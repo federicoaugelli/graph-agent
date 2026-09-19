@@ -4,12 +4,13 @@ import asyncio
 import contextlib
 import json
 import os
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
@@ -50,6 +51,7 @@ CHANNEL = "telegram"
 INCOMING_DIR = "incoming"
 TYPING_ACTION = "typing"
 TYPING_REFRESH_SECONDS = 4.0
+STREAM_EDIT_INTERVAL = 1.0
 
 MODE_REPLIES: dict[ApprovalMode, str] = {
     "auto": "Auto mode on: sensitive tools now run directly, without asking.",
@@ -215,6 +217,7 @@ class TelegramBot:
         text_parts: list[str] = []
         approval: ApprovalRequestEvent | None = None
         streaming = True
+        last_edit = 0.0
 
         try:
             async for event in stream:
@@ -224,18 +227,21 @@ class TelegramBot:
                     if placeholder is None:
                         if current:
                             typing_done.set()
-                            placeholder = await self.bot.send_message(
-                                chat_id=chat_id, text=current
-                            )
-                    elif streaming:
+                            placeholder = await self.bot.send_message(chat_id=chat_id, text=current)
+                            last_edit = time.monotonic()
+                    elif streaming and time.monotonic() - last_edit >= STREAM_EDIT_INTERVAL:
                         try:
                             await self.bot.edit_message_text(
                                 chat_id=chat_id,
                                 message_id=placeholder.message_id,
                                 text=current,
                             )
+                            last_edit = time.monotonic()
                         except TelegramBadRequest:
                             streaming = False
+                        except TelegramRetryAfter as exc:
+                            streaming = False
+                            await asyncio.sleep(exc.retry_after)
                 elif isinstance(event, ErrorEvent):
                     text_parts.append(f"\n[error] {event.message}")
                 elif isinstance(event, FileEvent):
@@ -284,23 +290,38 @@ class TelegramBot:
         """
         chunks = split_telegram_html(markdown_to_telegram_html(text))
         for index, chunk in enumerate(chunks):
-            try:
-                if index == 0:
+            if index == 0:
+                await self._replace_message(chat_id, message_id, chunk)
+            else:
+                try:
+                    await self.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=HTML)
+                except TelegramBadRequest:
+                    await self.bot.send_message(chat_id=chat_id, text=html_to_plain(chunk))
+
+    async def _replace_message(self, chat_id: int, message_id: int, chunk: str) -> None:
+        """Rewrite the streaming placeholder, degrading on parse errors or flood control.
+
+        Tries HTML first, then plain text; each attempt tolerates one RetryAfter by
+        waiting, and if editing stays impossible the chunk is sent as a new message.
+        """
+        for parse_mode, body in ((HTML, chunk), (None, html_to_plain(chunk))):
+            for attempt in range(2):
+                try:
                     await self.bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=message_id,
-                        text=chunk,
-                        parse_mode=HTML,
+                        text=body,
+                        parse_mode=parse_mode,
                     )
-                else:
-                    await self.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=HTML)
-            except TelegramBadRequest:
-                if index == 0:
-                    await self.bot.edit_message_text(
-                        chat_id=chat_id, message_id=message_id, text=html_to_plain(chunk)
-                    )
-                else:
-                    await self.bot.send_message(chat_id=chat_id, text=html_to_plain(chunk))
+                    return
+                except TelegramBadRequest:
+                    break
+                except TelegramRetryAfter as exc:
+                    if attempt == 0:
+                        await asyncio.sleep(exc.retry_after)
+                        continue
+                    break
+        await self.bot.send_message(chat_id=chat_id, text=html_to_plain(chunk))
 
     async def _send_approval_request(self, chat_id: int, approval: ApprovalRequestEvent) -> None:
         keyboard = InlineKeyboardMarkup(

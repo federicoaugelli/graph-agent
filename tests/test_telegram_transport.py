@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import SendMessage
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.methods import EditMessageText, SendMessage
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, Message
 
 from conftest import ScriptedLLMBackend
@@ -113,6 +113,15 @@ class HtmlRejectingBot(RecordingBot):
         if kwargs.get("parse_mode") is not None:
             raise TelegramBadRequest(SendMessage(chat_id=1, text="x"), "can't parse entities")
         return await super().edit_message_text(*args, **kwargs)
+
+
+class RetryAfterBot(RecordingBot):
+    """Behaves like Telegram under flood control: edits fail with RetryAfter."""
+
+    async def edit_message_text(self, *args: Any, **kwargs: Any) -> Message:
+        raise TelegramRetryAfter(
+            EditMessageText(chat_id=1, message_id=1, text="x"), "flood control", 0
+        )
 
 
 def make_message(text: str, chat_id: int = CHAT_ID, user_id: int = USER_ID) -> Message:
@@ -264,6 +273,55 @@ async def test_message_streams_final_answer(bot_env: Any) -> None:
 
     history = [message.content for message in backend.calls[-1]]
     assert "saluta" in history
+
+
+async def test_streaming_throttles_edits(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    chunks = [StreamChunk(delta_text=f"t{index} ") for index in range(20)]
+    chunks[-1] = StreamChunk(delta_text="t19", finish_reason="stop")
+    backend = ScriptedLLMBackend([chunks])
+    service = AgentService(app_config)
+    await service.setup(backend)
+    bot = TelegramBot(
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
+    )
+    recorder = RecordingBot()
+    bot.bot = recorder  # type: ignore[assignment]
+
+    await bot.handle_message(make_message("saluta"))
+
+    edits = [call for call in recorder.calls if call["method"] == "edit"]
+    assert len(edits) <= 2, "token deltas must not map one-to-one to edit_message_text calls"
+    assert (
+        recorder.calls[-1]["text"]
+        == "t0 t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12 t13 t14 t15 t16 t17 t18 t19"
+    )
+
+    await service.shutdown()
+
+
+async def test_flood_control_does_not_crash_the_handler(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    backend = ScriptedLLMBackend(
+        [[StreamChunk(delta_text="Hello "), StreamChunk(delta_text="world", finish_reason="stop")]]
+    )
+    service = AgentService(app_config)
+    await service.setup(backend)
+    bot = TelegramBot(
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
+    )
+    recorder = RetryAfterBot()
+    bot.bot = recorder  # type: ignore[assignment]
+
+    await bot.handle_message(make_message("saluta"))
+
+    assert recorder.calls[-1]["text"] == "Hello world"
+
+    await service.shutdown()
 
 
 async def test_command_menu_is_published(bot_env: Any) -> None:
