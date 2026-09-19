@@ -55,6 +55,7 @@ channels:
   telegram:
     enabled: false
     token_env: TELEGRAM_BOT_TOKEN
+    # fail-closed: empty list rejects every user
     allowed_user_ids: []
   realtime:
     enabled: false

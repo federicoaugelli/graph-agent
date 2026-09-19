@@ -42,7 +42,7 @@ class TelegramBot:
 
     Contract (Phase 3 tests pin this down):
     - session identifier = str(chat_id), thread id via SessionManager
-    - handle_message: allowed_user_ids gate, /new resets the thread, /auto and
+    - handle_message: allowed_user_ids gate (empty = deny all), /new resets the thread, /auto and
       /manual toggle the approval mode; anything else runs the agent and streams
       the reply via a send_message placeholder then edit_message_text
     - handle_file: downloads document/photo into workspace/incoming/{chat_id}/
@@ -67,8 +67,8 @@ class TelegramBot:
         self.dp = Dispatcher()
 
     def is_allowed(self, user_id: int) -> bool:
-        """Whether the user may talk to the agent (empty list = allow all)."""
-        return not self.config.allowed_user_ids or user_id in self.config.allowed_user_ids
+        """Whether the user may talk to the agent (empty allowlist = deny all)."""
+        return user_id in self.config.allowed_user_ids
 
     async def start(self) -> None:
         """Register handlers on self.dp and start long polling."""

@@ -203,13 +203,23 @@ async def test_is_allowed_respects_allowlist(bot_env: Any) -> None:
     assert bot.is_allowed(999) is False
 
     bot.config = TelegramChannelConfig(allowed_user_ids=[])
-    assert bot.is_allowed(1234) is True
+    assert bot.is_allowed(1234) is False
 
 
 async def test_disallowed_user_gets_silence(bot_env: Any) -> None:
     bot, recorder, backend, _ = bot_env
 
     await bot.handle_message(make_message("hello", user_id=999))
+
+    assert recorder.calls == []
+    assert backend.calls == []
+
+
+async def test_empty_allowlist_denies_everyone(bot_env: Any) -> None:
+    bot, recorder, backend, _ = bot_env
+    bot.config = TelegramChannelConfig(allowed_user_ids=[])
+
+    await bot.handle_message(make_message("hello"))
 
     assert recorder.calls == []
     assert backend.calls == []
@@ -239,7 +249,7 @@ async def test_telegram_session_is_chat_id_and_persists(
     service = AgentService(app_config)
     await service.setup(backend)
     bot = TelegramBot(
-        service, TelegramChannelConfig(allowed_user_ids=[]), SessionManager(service)
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
     )
     recorder = RecordingBot()
     bot.bot = recorder  # type: ignore[assignment]
@@ -403,7 +413,7 @@ async def test_new_command_starts_a_fresh_thread(
     service = AgentService(app_config)
     await service.setup(backend)
     bot = TelegramBot(
-        service, TelegramChannelConfig(allowed_user_ids=[]), SessionManager(service)
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
     )
     recorder = RecordingBot()
     bot.bot = recorder  # type: ignore[assignment]
@@ -449,7 +459,7 @@ async def test_agent_sends_workspace_file(
     service = AgentService(app_config)
     await service.setup(backend)
     bot = TelegramBot(
-        service, TelegramChannelConfig(allowed_user_ids=[]), SessionManager(service)
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
     )
     recorder = RecordingBot()
     bot.bot = recorder  # type: ignore[assignment]
@@ -475,7 +485,7 @@ async def test_incoming_document_is_saved_and_announced(
     service = AgentService(app_config)
     await service.setup(backend)
     bot = TelegramBot(
-        service, TelegramChannelConfig(allowed_user_ids=[]), SessionManager(service)
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
     )
     recorder = RecordingBot()
     bot.bot = recorder  # type: ignore[assignment]
@@ -503,7 +513,7 @@ async def test_incoming_photo_is_saved_as_jpg(
     service = AgentService(app_config)
     await service.setup(backend)
     bot = TelegramBot(
-        service, TelegramChannelConfig(allowed_user_ids=[]), SessionManager(service)
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
     )
     recorder = RecordingBot()
     bot.bot = recorder  # type: ignore[assignment]
