@@ -1,0 +1,10 @@
+ls /root/.ssh/id_ed25519.pub || ssh-keygen -t ed25519
+
+qm stop 120 && qm destroy 120
+qm create 120 --name Agent --ostype l26 --cores 1 --memory 1024 \
+  --scsihw virtio-scsi-single --serial0 socket --agent enabled=1 --net0 virtio,bridge=vmbr0
+qm set 120 --scsi0 local-lvm:0,import-from=/root/debian-13-genericcloud-amd64.qcow2
+qm set 120 --ide2 local-lvm:cloudinit --boot order=scsi0
+qm set 120 --ciuser <user> --sshkeys /root/.ssh/id_ed25519.pub --ipconfig0 ip=10.0.100.120/24,gw=10.0.100.1
+qm resize 120 scsi0 15G
+qm start 120

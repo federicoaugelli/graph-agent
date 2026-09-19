@@ -1,0 +1,37 @@
+[Unit]
+Description=Graph Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=@GRAPH_AGENT_USER@
+Group=@GRAPH_AGENT_USER@
+WorkingDirectory=@GRAPH_AGENT_DIR@
+ExecStart=@GRAPH_AGENT_DIR@/.venv/bin/graph-agent serve --config @GRAPH_AGENT_DIR@/config.yaml
+EnvironmentFile=-/etc/graph-agent/env
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# If bubblewrap refuses to start, relax NoNewPrivileges (setuid bwrap vs. userns).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@GRAPH_AGENT_DIR@
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+UMask=0077
+
+MemoryHigh=768M
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

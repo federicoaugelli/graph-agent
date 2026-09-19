@@ -1,0 +1,67 @@
+[project]
+name = "graph-agent"
+version = "0.1.0"
+description = "Modular personal agent built on LangGraph: multi-channel, tool calling, MCP, cron and realtime"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "langgraph>=0.4",
+    "langgraph-checkpoint-sqlite>=2.0",
+    "langchain-core>=0.3",
+    "openai>=1.55",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "pyyaml>=6.0",
+    "structlog>=24.4",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "websockets>=13.0",
+    "httpx>=0.27",
+    "aiogram>=3.13",
+    "apscheduler>=3.10,<4",
+    "mcp>=2.2",
+    "aiosqlite>=0.20",
+    "python-dotenv>=1.2.3",
+    "sqlalchemy>=2.0.54",
+]
+
+[project.scripts]
+graph-agent = "graph_agent.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/graph_agent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["graph_agent"]
+disallow_untyped_defs = true
+check_untyped_defs = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: live tests against a real model endpoint (opt-in via RUN_LIVE_TESTS=1)",
+]

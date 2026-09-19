@@ -1,0 +1,89 @@
+# Example configuration. Put overrides in config.local.yaml (gitignored).
+# Secrets do NOT belong here: use environment variables (GRAPH_AGENT_ prefix).
+
+models:
+  brain:
+    model: local-brain
+    api_base: http://localhost:4000
+    api_key_env: LITELLM_API_KEY
+    temperature: 0.2
+    max_tokens: 4096
+  router:
+    model: local-small
+    api_base: http://localhost:4000
+    api_key_env: LITELLM_API_KEY
+    temperature: 0.0
+    max_tokens: 256
+
+agent:
+  max_iterations: 25
+  workspace: data/workspace
+  checkpointer_db: data/checkpoints.sqlite
+  # hard-reset a session after this many minutes of inactivity (null = never)
+  session_ttl_minutes: null
+
+memory:
+  enabled: true
+  dir: memory
+
+skills:
+  # progressive disclosure: index in the system prompt, SKILL.md read on demand
+  enabled: true
+  dir: skills
+
+sandbox:
+  # shell execution via bubblewrap (deployed on a dedicated VM: no Docker)
+  timeout_seconds: 120
+  approval_required: true
+  # paths made invisible inside the jail (e.g. your secrets)
+  # mask_paths:
+  #   - /home/me/graph_agent/.env
+  # case-insensitive regexes that block commands before execution
+  deny_patterns:
+    - '\bsudo\b'
+    - '\brm\s+(-[a-z]*[rf][a-z]*\s+)+/'
+    - '\bmkfs\b'
+    - ':\(\)\s*\{'
+
+channels:
+  http:
+    enabled: false
+    host: 127.0.0.1
+    port: 8080
+    # Bearer auth for /v1/* (the secret lives in the env var, not here)
+    # api_key_env: GRAPH_AGENT_HTTP_TOKEN
+  telegram:
+    enabled: false
+    token_env: TELEGRAM_BOT_TOKEN
+    allowed_user_ids: []
+  realtime:
+    enabled: false
+    model: qwen-audio-realtime
+    litellm_base: http://localhost:4000
+
+scheduler:
+  enabled: false
+  jobstore_db: data/scheduler.sqlite
+
+mcp:
+  servers: []
+  # - name: kb
+  #   command: uvx
+  #   args: ["mcp-server-something"]
+  #   env: {}
+
+tools:
+  filesystem:
+    enabled: true
+    root: data/workspace
+  shell:
+    enabled: true
+  web_search:
+    # real api_base/enable in config.local.yaml (domain not versioned)
+    enabled: false
+    provider: searxng
+    api_base: http://localhost:8888
+
+logging:
+  level: INFO
+  json: false
