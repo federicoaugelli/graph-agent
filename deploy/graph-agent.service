@@ -8,7 +8,7 @@ Type=exec
 User=@GRAPH_AGENT_USER@
 Group=@GRAPH_AGENT_USER@
 WorkingDirectory=@GRAPH_AGENT_DIR@
-ExecStart=@GRAPH_AGENT_DIR@/.venv/bin/graph-agent serve --config @GRAPH_AGENT_DIR@/config.yaml
+ExecStart=@GRAPH_AGENT_DIR@/.venv/bin/graph-agent --config @GRAPH_AGENT_DIR@/config.yaml serve
 EnvironmentFile=-/etc/graph-agent/env
 Environment=PYTHONUNBUFFERED=1
 Restart=on-failure
