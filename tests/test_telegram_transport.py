@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import SendMessage
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, Message
 
 from conftest import ScriptedLLMBackend
@@ -79,6 +81,7 @@ class RecordingBot:
             "method": method,
             "chat_id": kwargs.get("chat_id"),
             "text": kwargs.get("text", ""),
+            "parse_mode": kwargs.get("parse_mode"),
             "reply_markup": kwargs.get("reply_markup"),
             "document": kwargs.get("document"),
             "caption": kwargs.get("caption"),
@@ -86,6 +89,20 @@ class RecordingBot:
         }
         self.calls.append(entry)
         return entry
+
+
+class HtmlRejectingBot(RecordingBot):
+    """Behaves like Telegram when HTML entity parsing fails."""
+
+    async def send_message(self, *args: Any, **kwargs: Any) -> Message:
+        if kwargs.get("parse_mode") is not None:
+            raise TelegramBadRequest(SendMessage(chat_id=1, text="x"), "can't parse entities")
+        return await super().send_message(*args, **kwargs)
+
+    async def edit_message_text(self, *args: Any, **kwargs: Any) -> Message:
+        if kwargs.get("parse_mode") is not None:
+            raise TelegramBadRequest(SendMessage(chat_id=1, text="x"), "can't parse entities")
+        return await super().edit_message_text(*args, **kwargs)
 
 
 def make_message(text: str, chat_id: int = CHAT_ID, user_id: int = USER_ID) -> Message:
@@ -237,6 +254,52 @@ async def test_message_streams_final_answer(bot_env: Any) -> None:
 
     history = [message.content for message in backend.calls[-1]]
     assert "saluta" in history
+
+
+async def test_final_reply_is_rendered_as_telegram_html(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    backend = ScriptedLLMBackend([text_chunks("**bold** and `code`")])
+    service = AgentService(app_config)
+    await service.setup(backend)
+    bot = TelegramBot(
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
+    )
+    recorder = RecordingBot()
+    bot.bot = recorder  # type: ignore[assignment]
+
+    await bot.handle_message(make_message("saluta"))
+
+    final = recorder.calls[-1]
+    assert final["method"] == "edit"
+    assert final["parse_mode"] == "HTML"
+    assert final["text"] == "<b>bold</b> and <code>code</code>"
+
+    await service.shutdown()
+
+
+async def test_html_failure_falls_back_to_plain_text(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    backend = ScriptedLLMBackend([text_chunks("**bold**")])
+    service = AgentService(app_config)
+    await service.setup(backend)
+    bot = TelegramBot(
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
+    )
+    recorder = HtmlRejectingBot()
+    bot.bot = recorder  # type: ignore[assignment]
+
+    await bot.handle_message(make_message("saluta"))
+
+    final = recorder.calls[-1]
+    assert final["method"] == "edit"
+    assert final["parse_mode"] is None
+    assert final["text"] == "bold"
+
+    await service.shutdown()
 
 
 async def test_telegram_session_is_chat_id_and_persists(

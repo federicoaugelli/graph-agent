@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     CallbackQuery,
     FSInputFile,
@@ -20,6 +21,14 @@ from graph_agent.core.service import AgentService
 from graph_agent.core.sessions import SessionManager
 from graph_agent.core.state import ApprovalMode
 from graph_agent.events import ApprovalRequestEvent, ErrorEvent, Event, FileEvent, TokenEvent
+from graph_agent.transports.telegram.formatting import (
+    escape_html,
+    html_to_plain,
+    markdown_to_telegram_html,
+    split_telegram_html,
+)
+
+HTML = "HTML"
 
 APPROVE_PREFIX = "approve:"
 DENY_PREFIX = "deny:"
@@ -37,6 +46,19 @@ MODE_REPLIES: dict[ApprovalMode, str] = {
 }
 
 
+async def send_telegram_html(bot: Bot, chat_id: int, text: str) -> None:
+    """Send a markdown reply rendered as Telegram HTML, chunked and with fallback.
+
+    Shared by the interactive transport and the scheduler's Telegram sink so both
+    channels render agent output the same way.
+    """
+    for chunk in split_telegram_html(markdown_to_telegram_html(text)):
+        try:
+            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=HTML)
+        except TelegramBadRequest:
+            await bot.send_message(chat_id=chat_id, text=html_to_plain(chunk))
+
+
 class TelegramBot:
     """Telegram transport (aiogram 3, long polling).
 
@@ -45,6 +67,8 @@ class TelegramBot:
     - handle_message: allowed_user_ids gate (empty = deny all), /new resets the thread, /auto and
       /manual toggle the approval mode; anything else runs the agent and streams
       the reply via a send_message placeholder then edit_message_text
+    - streaming edits stay plain text; the final reply is converted from markdown
+      to the Telegram HTML subset and sent with parse_mode=HTML (fallback: plain)
     - handle_file: downloads document/photo into workspace/incoming/{chat_id}/
       and runs the agent with the caption plus the saved path
     - ApprovalRequestEvent -> send_message with InlineKeyboardMarkup whose buttons
@@ -170,15 +194,20 @@ class TelegramBot:
         placeholder = await self.bot.send_message(chat_id=chat_id, text="...")
         text_parts: list[str] = []
         approval: ApprovalRequestEvent | None = None
+        streaming = True
 
         async for event in stream:
             if isinstance(event, TokenEvent):
                 text_parts.append(event.delta)
-                await self.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=placeholder.message_id,
-                    text="".join(text_parts),
-                )
+                if streaming:
+                    try:
+                        await self.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=placeholder.message_id,
+                            text="".join(text_parts),
+                        )
+                    except TelegramBadRequest:
+                        streaming = False
             elif isinstance(event, ErrorEvent):
                 text_parts.append(f"\n[error] {event.message}")
             elif isinstance(event, FileEvent):
@@ -192,12 +221,37 @@ class TelegramBot:
 
         final_text = "".join(text_parts).strip()
         if final_text:
-            await self.bot.edit_message_text(
-                chat_id=chat_id, message_id=placeholder.message_id, text=final_text
-            )
+            await self._edit_html(chat_id, placeholder.message_id, final_text)
 
         if approval is not None:
             await self._send_approval_request(chat_id, approval)
+
+    async def _edit_html(self, chat_id: int, message_id: int, text: str) -> None:
+        """Replace a message with the markdown rendered as Telegram HTML.
+
+        Long replies are split (Telegram caps messages at 4096 chars), the first
+        chunk replaces the streaming placeholder, the rest go as new messages.
+        If Telegram rejects the HTML it falls back to plain text.
+        """
+        chunks = split_telegram_html(markdown_to_telegram_html(text))
+        for index, chunk in enumerate(chunks):
+            try:
+                if index == 0:
+                    await self.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=chunk,
+                        parse_mode=HTML,
+                    )
+                else:
+                    await self.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=HTML)
+            except TelegramBadRequest:
+                if index == 0:
+                    await self.bot.edit_message_text(
+                        chat_id=chat_id, message_id=message_id, text=html_to_plain(chunk)
+                    )
+                else:
+                    await self.bot.send_message(chat_id=chat_id, text=html_to_plain(chunk))
 
     async def _send_approval_request(self, chat_id: int, approval: ApprovalRequestEvent) -> None:
         keyboard = InlineKeyboardMarkup(
@@ -214,11 +268,17 @@ class TelegramBot:
                 ]
             ]
         )
+        payload = json.dumps(approval.args, ensure_ascii=False, indent=2)
         caption = (
-            f"Approval required: {approval.name}\n"
-            f"{json.dumps(approval.args, ensure_ascii=False, indent=2)}"
+            f"<b>Approval required:</b> {escape_html(approval.name)}\n"
+            f"<pre>{escape_html(payload)}</pre>"
         )
-        await self.bot.send_message(chat_id=chat_id, text=caption, reply_markup=keyboard)
+        try:
+            await self.bot.send_message(
+                chat_id=chat_id, text=caption, reply_markup=keyboard, parse_mode=HTML
+            )
+        except TelegramBadRequest:
+            await self.bot.send_message(chat_id=chat_id, text=caption, reply_markup=keyboard)
 
 
 def _attachment(message: Message) -> tuple[Any, str] | None:

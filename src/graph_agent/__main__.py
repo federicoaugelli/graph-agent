@@ -53,19 +53,40 @@ async def _cmd_serve(config: AppConfig) -> None:
 
         service.registry.register(ScheduleTool(scheduler))
         if telegram is not None and config.channels.telegram.allowed_user_ids:
+            from aiogram.exceptions import TelegramBadRequest
             from aiogram.types import FSInputFile
+
+            from graph_agent.transports.telegram.bot import send_telegram_html
+            from graph_agent.transports.telegram.formatting import (
+                html_to_plain,
+                markdown_to_telegram_html,
+            )
 
             chat_id = config.channels.telegram.allowed_user_ids[0]
             bot = telegram.bot
 
             class TelegramSink:
                 async def send(self, text: str) -> None:
-                    await bot.send_message(chat_id=chat_id, text=text)
+                    await send_telegram_html(bot, chat_id, text)
 
                 async def send_file(self, path: str, caption: str | None = None) -> None:
-                    await bot.send_document(
-                        chat_id=chat_id, document=FSInputFile(path), caption=caption
-                    )
+                    if caption is None:
+                        await bot.send_document(chat_id=chat_id, document=FSInputFile(path))
+                        return
+                    formatted = markdown_to_telegram_html(caption)
+                    try:
+                        await bot.send_document(
+                            chat_id=chat_id,
+                            document=FSInputFile(path),
+                            caption=formatted,
+                            parse_mode="HTML",
+                        )
+                    except TelegramBadRequest:
+                        await bot.send_document(
+                            chat_id=chat_id,
+                            document=FSInputFile(path),
+                            caption=html_to_plain(formatted),
+                        )
 
             scheduler.register_sink("telegram", TelegramSink())
 
