@@ -15,7 +15,7 @@ from graph_agent.core.sessions import SessionManager
 from graph_agent.models.llm import StreamChunk, ToolCallRequest
 from graph_agent.tools.base import ToolContext, ToolSpec
 from graph_agent.transports.telegram import TelegramBot
-from graph_agent.transports.telegram.bot import APPROVE_PREFIX, DENY_PREFIX
+from graph_agent.transports.telegram.bot import APPROVE_PREFIX, COMMANDS, DENY_PREFIX
 
 TOKEN = "42:TEST"
 CHAT_ID = 7
@@ -61,6 +61,14 @@ class RecordingBot:
         self._record("edit", args, kwargs)
         return self._make_message("")
 
+    async def send_chat_action(self, *args: Any, **kwargs: Any) -> bool:
+        self._record("chat_action", args, kwargs)
+        return True
+
+    async def set_my_commands(self, *args: Any, **kwargs: Any) -> bool:
+        self._record("set_my_commands", args, kwargs)
+        return True
+
     async def answer_callback_query(self, *args: Any, **kwargs: Any) -> bool:
         self._record("answer", args, kwargs)
         return True
@@ -86,6 +94,8 @@ class RecordingBot:
             "document": kwargs.get("document"),
             "caption": kwargs.get("caption"),
             "destination": kwargs.get("destination"),
+            "action": kwargs.get("action") or (args[1] if len(args) > 1 else None),
+            "commands": kwargs.get("commands") or (args[0] if args else None),
         }
         self.calls.append(entry)
         return entry
@@ -254,6 +264,36 @@ async def test_message_streams_final_answer(bot_env: Any) -> None:
 
     history = [message.content for message in backend.calls[-1]]
     assert "saluta" in history
+
+
+async def test_command_menu_is_published(bot_env: Any) -> None:
+    bot, recorder, _, _ = bot_env
+
+    await bot.set_commands()
+
+    published = next(c for c in recorder.calls if c["method"] == "set_my_commands")
+    assert published["commands"] == COMMANDS
+    assert [command.command for command in published["commands"]] == ["new", "auto", "manual"]
+
+
+async def test_typing_action_precedes_output(bot_env: Any) -> None:
+    bot, recorder, _, _ = bot_env
+
+    await bot.handle_message(make_message("saluta"))
+
+    assert not any(call["text"] == "..." for call in recorder.calls)
+
+    methods = [call["method"] for call in recorder.calls]
+    assert methods.count("chat_action") >= 1
+    typing = recorder.calls[methods.index("chat_action")]
+    assert typing["action"] == "typing"
+
+    output_index = next(
+        index
+        for index, call in enumerate(recorder.calls)
+        if call["method"] in {"send", "edit"} and call["text"]
+    )
+    assert methods.index("chat_action") < output_index
 
 
 async def test_final_reply_is_rendered_as_telegram_html(

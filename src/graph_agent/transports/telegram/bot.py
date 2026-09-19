@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
 from collections.abc import AsyncIterator
@@ -9,6 +11,7 @@ from typing import Any
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     FSInputFile,
     InlineKeyboardButton,
@@ -37,8 +40,16 @@ AUTO_COMMAND = "/auto"
 MANUAL_COMMAND = "/manual"
 NEW_COMMAND = "/new"
 
+COMMANDS: list[BotCommand] = [
+    BotCommand(command="new", description="Start a fresh session"),
+    BotCommand(command="auto", description="Approve sensitive tools automatically"),
+    BotCommand(command="manual", description="Ask before sensitive tools"),
+]
+
 CHANNEL = "telegram"
 INCOMING_DIR = "incoming"
+TYPING_ACTION = "typing"
+TYPING_REFRESH_SECONDS = 4.0
 
 MODE_REPLIES: dict[ApprovalMode, str] = {
     "auto": "Auto mode on: sensitive tools now run directly, without asking.",
@@ -94,8 +105,13 @@ class TelegramBot:
         """Whether the user may talk to the agent (empty allowlist = deny all)."""
         return user_id in self.config.allowed_user_ids
 
+    async def set_commands(self) -> None:
+        """Publish the slash-command menu so clients can list it under ``/``."""
+        await self.bot.set_my_commands(COMMANDS)
+
     async def start(self) -> None:
         """Register handlers on self.dp and start long polling."""
+        await self.set_commands()
         self.dp.message.register(self.handle_message, F.text)
         self.dp.message.register(self.handle_file, F.document | F.photo)
         self.dp.callback_query.register(
@@ -191,40 +207,73 @@ class TelegramBot:
         await self._stream_reply(chat_id, self.service.resume(thread_id, approval_id, approved))
 
     async def _stream_reply(self, chat_id: int, stream: AsyncIterator[Event]) -> None:
-        placeholder = await self.bot.send_message(chat_id=chat_id, text="...")
+        typing_done = asyncio.Event()
+        typing_task = asyncio.create_task(self._keep_typing(chat_id, typing_done))
+        await self._send_typing(chat_id)
+
+        placeholder: Message | None = None
         text_parts: list[str] = []
         approval: ApprovalRequestEvent | None = None
         streaming = True
 
-        async for event in stream:
-            if isinstance(event, TokenEvent):
-                text_parts.append(event.delta)
-                if streaming:
-                    try:
-                        await self.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=placeholder.message_id,
-                            text="".join(text_parts),
-                        )
-                    except TelegramBadRequest:
-                        streaming = False
-            elif isinstance(event, ErrorEvent):
-                text_parts.append(f"\n[error] {event.message}")
-            elif isinstance(event, FileEvent):
-                await self.bot.send_document(
-                    chat_id=chat_id,
-                    document=FSInputFile(event.path),
-                    caption=event.caption,
-                )
-            elif isinstance(event, ApprovalRequestEvent):
-                approval = event
+        try:
+            async for event in stream:
+                if isinstance(event, TokenEvent):
+                    text_parts.append(event.delta)
+                    current = "".join(text_parts)
+                    if placeholder is None:
+                        if current:
+                            typing_done.set()
+                            placeholder = await self.bot.send_message(
+                                chat_id=chat_id, text=current
+                            )
+                    elif streaming:
+                        try:
+                            await self.bot.edit_message_text(
+                                chat_id=chat_id,
+                                message_id=placeholder.message_id,
+                                text=current,
+                            )
+                        except TelegramBadRequest:
+                            streaming = False
+                elif isinstance(event, ErrorEvent):
+                    text_parts.append(f"\n[error] {event.message}")
+                elif isinstance(event, FileEvent):
+                    await self.bot.send_document(
+                        chat_id=chat_id,
+                        document=FSInputFile(event.path),
+                        caption=event.caption,
+                    )
+                elif isinstance(event, ApprovalRequestEvent):
+                    approval = event
+        finally:
+            typing_done.set()
+            typing_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await typing_task
 
         final_text = "".join(text_parts).strip()
         if final_text:
-            await self._edit_html(chat_id, placeholder.message_id, final_text)
+            if placeholder is not None:
+                await self._edit_html(chat_id, placeholder.message_id, final_text)
+            else:
+                await send_telegram_html(self.bot, chat_id, final_text)
 
         if approval is not None:
             await self._send_approval_request(chat_id, approval)
+
+    async def _send_typing(self, chat_id: int) -> None:
+        with contextlib.suppress(TelegramBadRequest):
+            await self.bot.send_chat_action(chat_id=chat_id, action=TYPING_ACTION)
+
+    async def _keep_typing(self, chat_id: int, done: asyncio.Event) -> None:
+        while True:
+            try:
+                await asyncio.wait_for(done.wait(), timeout=TYPING_REFRESH_SECONDS)
+                return
+            except TimeoutError:
+                pass
+            await self._send_typing(chat_id)
 
     async def _edit_html(self, chat_id: int, message_id: int, text: str) -> None:
         """Replace a message with the markdown rendered as Telegram HTML.
