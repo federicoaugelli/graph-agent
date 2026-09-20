@@ -69,6 +69,11 @@ class AgentService:
             raise RuntimeError("service not initialized")
         return self._registry
 
+    @property
+    def default_system_prompt(self) -> str | None:
+        """Composed system prompt (persona + skills + memory), if the service is set up."""
+        return self._default_system_prompt
+
     async def setup(self, backend: LLMBackend | None = None) -> None:
         """Initialize LLM backend, tool registry, checkpointer and compile the graph."""
         if self._graph is not None:

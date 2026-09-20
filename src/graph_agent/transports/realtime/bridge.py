@@ -10,7 +10,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from graph_agent.config import RealtimeChannelConfig
 from graph_agent.core.service import AgentService
-from graph_agent.events import ErrorEvent, TokenEvent
+from graph_agent.events import DoneEvent, ErrorEvent, TokenEvent
 from graph_agent.models.realtime import (
     RealtimeBackend,
     RealtimeConnection,
@@ -18,6 +18,14 @@ from graph_agent.models.realtime import (
 )
 
 DELEGATE_TOOL_NAME = "delegate_to_brain"
+
+DELEGATE_INSTRUCTION = (
+    "You are the realtime voice interface of an autonomous agent that owns persistent "
+    "memory, files, tools and multi-step reasoning. For anything that needs them "
+    "(personal facts, prior context, files, research, actions) call the "
+    "`delegate_to_brain` tool with a self-contained prompt. Never claim you lack memory "
+    "or capabilities: delegate instead."
+)
 
 DELEGATE_TOOL: dict[str, Any] = {
     "type": "function",
@@ -55,8 +63,19 @@ def _ensure_delegate_tool(session: dict[str, Any]) -> None:
         tools.append(DELEGATE_TOOL)
 
 
-def _delegate_session_update() -> dict[str, Any]:
-    return {"type": "session.update", "session": {"tools": [DELEGATE_TOOL]}}
+def _ensure_delegate_instructions(session: dict[str, Any]) -> None:
+    existing = session.get("instructions")
+    if not isinstance(existing, str) or not existing:
+        session["instructions"] = DELEGATE_INSTRUCTION
+    elif DELEGATE_INSTRUCTION not in existing:
+        session["instructions"] = f"{existing}\n\n{DELEGATE_INSTRUCTION}"
+
+
+def _delegate_session_update(instructions: str) -> dict[str, Any]:
+    return {
+        "type": "session.update",
+        "session": {"tools": [DELEGATE_TOOL], "instructions": instructions},
+    }
 
 
 class StarletteWebSocketConnection:
@@ -136,6 +155,7 @@ class RealtimeBridge:
                 session = event.get("session")
                 if isinstance(session, dict):
                     _ensure_delegate_tool(session)
+                    _ensure_delegate_instructions(session)
             await backend.send(event)
 
     async def _backend_to_client(
@@ -143,10 +163,17 @@ class RealtimeBridge:
     ) -> None:
         async for event in backend.events():
             if event.get("type") == "session.created":
-                await backend.send(_delegate_session_update())
+                await backend.send(_delegate_session_update(self._session_instructions()))
             elif self._is_delegate_call(event):
                 await self._handle_delegate(event, backend, session_id)
+                continue
             await client.send(event)
+
+    def _session_instructions(self) -> str:
+        base = self.service.default_system_prompt
+        if base:
+            return f"{base}\n\n{DELEGATE_INSTRUCTION}"
+        return DELEGATE_INSTRUCTION
 
     def _is_delegate_call(self, event: dict[str, Any]) -> bool:
         return (
@@ -163,7 +190,13 @@ class RealtimeBridge:
         except json.JSONDecodeError:
             args = {}
         prompt = str(args.get("prompt") or args.get("task") or "").strip()
-        output = await self._run_agent(session_id, prompt)
+        if prompt:
+            output = await self._run_agent(session_id, prompt)
+        else:
+            output = (
+                "delegate_to_brain requires a non-empty 'prompt' argument "
+                "describing the task for the main agent."
+            )
         await backend.send(
             {
                 "type": "conversation.item.create",
@@ -178,9 +211,15 @@ class RealtimeBridge:
 
     async def _run_agent(self, session_id: str, prompt: str) -> str:
         parts: list[str] = []
-        async for event in self.service.run(session_id, prompt):
+        final_text: str | None = None
+        async for event in self.service.run(session_id, prompt, approval_mode="auto"):
             if isinstance(event, TokenEvent):
                 parts.append(event.delta)
             elif isinstance(event, ErrorEvent):
                 parts.append(f"[error] {event.message}")
-        return "".join(parts) or "(no response)"
+            elif isinstance(event, DoneEvent):
+                final_text = event.final_text
+        text = "".join(parts)
+        if not text and final_text:
+            text = final_text
+        return text or "(no response)"
