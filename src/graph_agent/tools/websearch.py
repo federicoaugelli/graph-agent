@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -7,11 +8,17 @@ import httpx
 from graph_agent.config import WebSearchToolConfig
 from graph_agent.tools.base import ToolContext, ToolSpec
 
+_USER_AGENT = "graph-agent/0.1 (+web_search)"
+_RETRYABLE_STATUS = {429, 503}
+_MAX_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = 0.5
+
 
 class WebSearchTool:
     """Web search via external provider (default: self-hosted SearXNG instance).
 
-    To implement (Fase 1): normalize provider results to [{title, url, snippet}].
+    Normalizes provider results to [{title, url, snippet}]. Raises when the provider
+    returns no results so the agent sees a failed search instead of an empty answer.
     """
 
     def __init__(
@@ -50,13 +57,22 @@ class WebSearchTool:
 
     async def _search_searxng(self, query: str, max_results: int) -> list[dict[str, str]]:
         base = str(self.config.api_base).rstrip("/")
-        async with httpx.AsyncClient(transport=self._transport, timeout=10.0) as client:
-            response = await client.get(
+        headers = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
+        async with httpx.AsyncClient(
+            transport=self._transport,
+            timeout=self.config.timeout_seconds,
+            headers=headers,
+        ) as client:
+            response = await self._get_with_retry(
+                client,
                 f"{base}/search",
                 params={"q": query, "format": "json"},
             )
-            response.raise_for_status()
             body = response.json()
+
+        results = body.get("results", [])
+        if not results:
+            raise RuntimeError(self._no_results_message(body))
 
         return [
             {
@@ -64,5 +80,29 @@ class WebSearchTool:
                 "url": r.get("url", ""),
                 "snippet": r.get("content") or "",
             }
-            for r in body.get("results", [])[:max_results]
+            for r in results[:max_results]
         ]
+
+    async def _get_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        *,
+        params: dict[str, str],
+    ) -> httpx.Response:
+        response = await client.get(url, params=params)
+        for attempt in range(1, _MAX_ATTEMPTS):
+            if response.status_code not in _RETRYABLE_STATUS:
+                break
+            await asyncio.sleep(_RETRY_BACKOFF_SECONDS * attempt)
+            response = await client.get(url, params=params)
+
+        response.raise_for_status()
+        return response
+
+    def _no_results_message(self, body: dict[str, Any]) -> str:
+        unresponsive = body.get("unresponsive_engines") or []
+        if not unresponsive:
+            return "web_search: provider returned no results"
+        detail = ", ".join(f"{engine}: {reason}" for engine, reason in unresponsive)
+        return f"web_search: no results, engines unavailable ({detail})"

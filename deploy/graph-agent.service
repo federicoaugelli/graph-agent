@@ -15,9 +15,11 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 
-# ProtectKernelTunables=true makes /proc/sys a locked read-only mount; bubblewrap
-# then gets EPERM mounting its own /proc ("Can't mount proc ... Operation not permitted").
-# The sandbox already runs in its own user+mount namespace, so leave it off here.
+# ProtectKernelTunables / ProtectHostname create locked read-only bind mounts over
+# /proc (proc/sys and proc/sys/kernel/hostname+domainname). Combined with the other
+# Protect* mounts below, bubblewrap then gets EPERM mounting its own /proc
+# ("Can't mount proc on /proc: Operation not permitted"). The sandbox already runs in
+# its own user/uts/mount namespace, so leave them off here.
 # If bubblewrap refuses to start, relax NoNewPrivileges (setuid bwrap vs. userns).
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -27,7 +29,6 @@ PrivateTmp=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 ProtectClock=true
-ProtectHostname=true
 LockPersonality=true
 RestrictRealtime=true
 UMask=0077

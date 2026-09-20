@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from graph_agent.config import WebSearchToolConfig
+from graph_agent.tools import websearch as websearch_module
 from graph_agent.tools.base import ToolContext
 from graph_agent.tools.websearch import WebSearchTool
 
@@ -136,7 +137,7 @@ async def test_unknown_provider_raises(minimal_config: Any) -> None:
     assert "request" not in captured
 
 
-async def test_empty_results_returns_empty_list(minimal_config: Any) -> None:
+async def test_empty_results_raises(minimal_config: Any) -> None:
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -145,9 +146,108 @@ async def test_empty_results_returns_empty_list(minimal_config: Any) -> None:
     tool = build_tool(handler, captured)
     ctx = await make_ctx(minimal_config)
 
-    results = await tool.execute({"query": "asdfqwerty12345zz"}, ctx)
+    with pytest.raises(RuntimeError, match="no results"):
+        await tool.execute({"query": "asdfqwerty12345zz"}, ctx)
 
-    assert results == []
+
+async def test_empty_results_reports_unresponsive_engines(minimal_config: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [],
+                "unresponsive_engines": [
+                    ["brave", "Suspended: too many requests"],
+                    ["duckduckgo", "CAPTCHA"],
+                ],
+            },
+        )
+
+    tool = build_tool(handler, captured)
+    ctx = await make_ctx(minimal_config)
+
+    with pytest.raises(RuntimeError, match=r"brave: Suspended.*duckduckgo: CAPTCHA"):
+        await tool.execute({"query": "x"}, ctx)
+
+
+async def test_partial_results_ignore_unresponsive_engines(minimal_config: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = searx_payload(2)
+        payload["unresponsive_engines"] = [["brave", "Suspended: too many requests"]]
+        return httpx.Response(200, json=payload)
+
+    tool = build_tool(handler, captured)
+    ctx = await make_ctx(minimal_config)
+
+    results = await tool.execute({"query": "x"}, ctx)
+
+    assert len(results) == 2
+
+
+async def test_sends_user_agent(minimal_config: Any) -> None:
+    captured: dict[str, Any] = {}
+    tool = build_tool(ok_handler(), captured)
+    ctx = await make_ctx(minimal_config)
+
+    await tool.execute({"query": "x"}, ctx)
+
+    assert "graph-agent" in captured["request"].headers["user-agent"]
+
+
+async def test_retries_on_rate_limit(
+    minimal_config: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    calls = {"n": 0}
+
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(websearch_module.asyncio, "sleep", fake_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429)
+        return httpx.Response(200, json=searx_payload(2))
+
+    tool = build_tool(handler, captured)
+    ctx = await make_ctx(minimal_config)
+
+    results = await tool.execute({"query": "x"}, ctx)
+
+    assert calls["n"] == 2
+    assert len(results) == 2
+
+
+async def test_gives_up_after_max_attempts(
+    minimal_config: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    calls = {"n": 0}
+
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(websearch_module.asyncio, "sleep", fake_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429)
+
+    tool = build_tool(handler, captured)
+    ctx = await make_ctx(minimal_config)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await tool.execute({"query": "x"}, ctx)
+
+    assert calls["n"] == websearch_module._MAX_ATTEMPTS
 
 
 async def test_http_error_propagates(minimal_config: Any) -> None:
@@ -157,3 +257,7 @@ async def test_http_error_propagates(minimal_config: Any) -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         await tool.execute({"query": "x"}, ctx)
+
+
+def test_timeout_defaults_to_thirty_seconds() -> None:
+    assert WebSearchToolConfig().timeout_seconds == 30.0

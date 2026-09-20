@@ -90,6 +90,8 @@ tools:
     enabled: false
     provider: searxng
     api_base: http://localhost:8888
+    # SearXNG aggregates several engines; a single query routinely takes ~5s.
+    timeout_seconds: 30
 
 logging:
   level: INFO

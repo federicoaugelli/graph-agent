@@ -105,6 +105,7 @@ class WebSearchToolConfig(BaseModel):
     provider: str = "searxng"
     api_base: str | None = None
     api_key_env: str | None = None
+    timeout_seconds: float = 30.0
 
 
 class ToolsConfig(BaseModel):
