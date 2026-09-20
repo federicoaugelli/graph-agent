@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
@@ -65,8 +66,10 @@ class TelegramChannelConfig(BaseModel):
 
 class RealtimeChannelConfig(BaseModel):
     enabled: bool = False
+    backend: Literal["openai", "qwen"] = "openai"
     model: str = ""
-    litellm_base: str = "http://localhost:4000"
+    api_base: str = "http://localhost:4000"
+    api_key_env: str | None = None
 
 
 class ChannelsConfig(BaseModel):

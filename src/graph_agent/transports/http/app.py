@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,7 @@ from graph_agent.events import (
     FileEvent,
     TokenEvent,
 )
+from graph_agent.transports.realtime.bridge import RealtimeBridge, StarletteWebSocketConnection
 
 DEFAULT_SESSION_ID = "default"
 CHANNEL = "http"
@@ -160,7 +161,19 @@ def _unauthorized() -> JSONResponse:
     )
 
 
-def create_app(service: AgentService, config: AppConfig, sessions: SessionManager) -> FastAPI:
+def _ws_token(websocket: WebSocket) -> str:
+    scheme, _, token = websocket.headers.get("authorization", "").partition(" ")
+    if scheme.lower() == "bearer" and token:
+        return token
+    return websocket.query_params.get("api_key") or websocket.query_params.get("token") or ""
+
+
+def create_app(
+    service: AgentService,
+    config: AppConfig,
+    sessions: SessionManager,
+    realtime: RealtimeBridge | None = None,
+) -> FastAPI:
     app = FastAPI(title="graph-agent", version="0.1.0")
     auth_env = config.channels.http.api_key_env
 
@@ -176,6 +189,27 @@ def create_app(service: AgentService, config: AppConfig, sessions: SessionManage
         if not expected or scheme.lower() != "bearer" or not hmac.compare_digest(token, expected):
             return _unauthorized()
         return await call_next(request)
+
+    @app.websocket("/v1/realtime")
+    async def realtime_endpoint(websocket: WebSocket) -> None:
+        if realtime is None:
+            await websocket.close(code=1011)
+            return
+        if auth_env is not None:
+            expected = os.environ.get(auth_env, "")
+            token = _ws_token(websocket)
+            if not expected or not hmac.compare_digest(token, expected):
+                await websocket.close(code=1008)
+                return
+
+        await websocket.accept()
+        client = StarletteWebSocketConnection(websocket)
+        try:
+            await realtime.handle(client, f"realtime:{uuid4().hex}")
+        except WebSocketDisconnect:
+            pass
+        finally:
+            await client.close()
 
     @app.get("/health")
     async def health() -> dict[str, str]:

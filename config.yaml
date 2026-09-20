@@ -64,9 +64,15 @@ channels:
     # fail-closed: empty list rejects every user
     allowed_user_ids: []
   realtime:
+    # served on the HTTP server (same host/port/token): ws://<host>:<port>/v1/realtime
     enabled: false
-    model: qwen-audio-realtime
-    litellm_base: http://localhost:4000
+    # backend: "openai" (OpenAI-compatible, e.g. LiteLLM /v1/realtime) or "qwen" (Alibaba Model Studio)
+    backend: openai
+    model: ""
+    # openai: LiteLLM base (http://localhost:4000)
+    # qwen:   full realtime URL, e.g. wss://<workspace>.<region>.maas.aliyuncs.com/api-ws/v1/realtime
+    api_base: http://localhost:4000
+    # api_key_env: LITELLM_API_KEY
 
 scheduler:
   enabled: false

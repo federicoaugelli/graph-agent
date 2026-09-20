@@ -31,7 +31,14 @@ async def _cmd_serve(config: AppConfig) -> None:
     service = AgentService(config)
     await service.setup()
     sessions = SessionManager(service, ttl_minutes=config.agent.session_ttl_minutes)
-    app = create_app(service, config, sessions)
+
+    realtime = None
+    if config.channels.realtime.enabled:
+        from graph_agent.transports.realtime import RealtimeBridge
+
+        realtime = RealtimeBridge(service, config.channels.realtime)
+
+    app = create_app(service, config, sessions, realtime)
     http = config.channels.http
     server = uvicorn.Server(uvicorn.Config(app, host=http.host, port=http.port, log_level="info"))
 
