@@ -25,6 +25,7 @@ from graph_agent.core.service import AgentService
 from graph_agent.core.sessions import SessionManager
 from graph_agent.core.state import ApprovalMode
 from graph_agent.events import ApprovalRequestEvent, ErrorEvent, Event, FileEvent, TokenEvent
+from graph_agent.media import image_content_part, is_image
 from graph_agent.transports.telegram.formatting import (
     escape_html,
     html_to_plain,
@@ -169,11 +170,19 @@ class TelegramBot:
         await self.bot.download(file=file, destination=destination)
 
         caption = (message.caption or "").strip()
-        note = f"[user sent a file, saved in the workspace at {relative}]"
+        kind = "image" if is_image(destination) else "file"
+        note = f"[user sent a {kind}, saved in the workspace at {relative}]"
         prompt = f"{caption}\n{note}".strip() if caption else note
 
         thread_id = await self.sessions.thread_id(CHANNEL, identifier)
-        await self._stream_reply(chat_id, self.service.run(thread_id, prompt))
+        if is_image(destination):
+            content: list[dict[str, Any]] = [
+                {"type": "text", "text": prompt},
+                image_content_part(destination),
+            ]
+            await self._stream_reply(chat_id, self.service.run(thread_id, content))
+        else:
+            await self._stream_reply(chat_id, self.service.run(thread_id, prompt))
 
     async def handle_approval_callback(self, callback: CallbackQuery) -> None:
         """Callback handler: approve/deny -> service.resume(), then stream result."""

@@ -32,11 +32,14 @@ def to_openai_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
     """Convert LangChain messages -> OpenAI chat format (role/content/tool_calls dicts)."""
     out: list[dict[str, Any]] = []
     for msg in messages:
-        content = msg.content if isinstance(msg.content, str) else str(msg.content or "")
+        raw = msg.content
+        content: Any = raw if isinstance(raw, (str, list)) else str(raw or "")
         if isinstance(msg, ToolMessage):
-            out.append({"role": "tool", "content": content, "tool_call_id": msg.tool_call_id})
+            out.append(
+                {"role": "tool", "content": _as_text(content), "tool_call_id": msg.tool_call_id}
+            )
         elif isinstance(msg, AIMessage):
-            entry: dict[str, Any] = {"role": "assistant", "content": content}
+            entry: dict[str, Any] = {"role": "assistant", "content": _as_text(content)}
             if msg.tool_calls:
                 entry["tool_calls"] = [
                     {
@@ -51,6 +54,12 @@ def to_openai_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
             role = {"system": "system", "human": "user"}.get(msg.type, msg.type)
             out.append({"role": role, "content": content})
     return out
+
+
+def _as_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, ensure_ascii=False, default=str) if content else ""
 
 
 class LLMBackend(Protocol):

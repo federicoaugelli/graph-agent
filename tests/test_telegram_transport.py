@@ -686,6 +686,13 @@ async def test_incoming_photo_is_saved_as_jpg(
     assert destination.name == "photo_photo-unique.jpg"
     assert destination.exists()
 
+    last_message = backend.calls[-1][-1]
+    assert isinstance(last_message.content, list)
+    parts = last_message.content
+    assert parts[0]["type"] == "text"
+    image_part = next(part for part in parts if part["type"] == "image_url")
+    assert image_part["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
     await service.shutdown()
 
 

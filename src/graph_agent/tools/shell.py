@@ -38,9 +38,10 @@ class BwrapRunner:
 
     def _build_argv(self, command: str, workspace: Path) -> list[str]:
         ws = str(Path(workspace).resolve())
-        argv = [
-            "bwrap",
-            "--unshare-all",
+        argv = ["bwrap", "--unshare-all"]
+        if self.config.network:
+            argv += ["--share-net"]
+        argv += [
             "--unshare-user",
             "--disable-userns",
             "--die-with-parent",
@@ -48,23 +49,27 @@ class BwrapRunner:
             "--clearenv",
             "--setenv",
             "HOME",
-            "/tmp",
+            ws,
             "--setenv",
             "PATH",
-            "/usr/local/bin:/usr/bin:/bin",
+            f"{ws}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            "--ro-bind",
+            "/",
+            "/",
             "--proc",
             "/proc",
             "--dev",
             "/dev",
             "--tmpfs",
             "/tmp",
-            "--ro-bind",
-            "/",
-            "/",
             "--bind",
             ws,
             ws,
         ]
+        for guest, host in self.config.writable_binds.items():
+            source = Path(host).resolve()
+            source.mkdir(parents=True, exist_ok=True)
+            argv += ["--bind", str(source), str(guest)]
         for path in self.config.mask_paths:
             resolved = Path(path).resolve()
             if resolved.is_dir():

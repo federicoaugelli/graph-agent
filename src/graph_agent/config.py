@@ -44,6 +44,8 @@ class SandboxConfig(BaseModel):
     timeout_seconds: int = 120
     max_output_bytes: int = 20_000
     approval_required: bool = True
+    network: bool = False
+    writable_binds: dict[str, str] = Field(default_factory=dict)
     mask_paths: list[Path] = Field(default_factory=list)
     deny_patterns: list[str] = Field(default_factory=list)
 

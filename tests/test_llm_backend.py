@@ -83,6 +83,18 @@ def test_to_openai_messages_basic() -> None:
     ]
 
 
+def test_to_openai_messages_keeps_multimodal_parts() -> None:
+    content = [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}},
+    ]
+    messages: list[BaseMessage] = [HumanMessage(content=content)]
+
+    out = to_openai_messages(messages)
+
+    assert out == [{"role": "user", "content": content}]
+
+
 def test_to_openai_messages_tool_roundtrip() -> None:
     messages: list[BaseMessage] = [
         HumanMessage(content="leggi a.txt"),

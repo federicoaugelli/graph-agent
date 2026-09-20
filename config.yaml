@@ -35,6 +35,12 @@ sandbox:
   # shell execution via bubblewrap (deployed on a dedicated VM: no Docker)
   timeout_seconds: 120
   approval_required: true
+  # share the host network namespace (needed by curl/pip/apt). Off = no outbound net.
+  network: false
+  # extra writable binds {destination_inside_jail: host_path}. Use to let the agent
+  # install packages that persist (pip/uv/static binaries), e.g.:
+  # writable_binds:
+  #   /usr/local: /opt/graph-agent/usr-local
   # paths made invisible inside the jail (e.g. your secrets)
   # mask_paths:
   #   - /home/me/graph_agent/.env

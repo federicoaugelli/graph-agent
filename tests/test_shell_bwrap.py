@@ -106,6 +106,57 @@ async def test_masks_are_applied_after_system_bind(
     assert idx_ro < argv.index(str(secret_file.resolve()))
 
 
+async def test_system_root_is_bound_before_proc_and_dev(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = patch_spawn(monkeypatch, FakeProcess(b"", b"", 0))
+    runner = BwrapRunner(SandboxConfig())
+
+    await runner.run("true", timeout_seconds=5, workspace=Path("/tmp/ws"))
+
+    argv = recorder.argv
+    assert argv.index("--ro-bind") < argv.index("--proc")
+    assert argv.index("--ro-bind") < argv.index("--dev")
+
+
+async def test_network_shares_host_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = patch_spawn(monkeypatch, FakeProcess(b"", b"", 0))
+    runner = BwrapRunner(SandboxConfig(network=True))
+
+    await runner.run("true", timeout_seconds=5, workspace=Path("/tmp/ws"))
+
+    argv = recorder.argv
+    assert "--share-net" in argv
+    assert argv.index("--unshare-all") < argv.index("--share-net")
+
+
+async def test_network_is_isolated_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = patch_spawn(monkeypatch, FakeProcess(b"", b"", 0))
+    runner = BwrapRunner(SandboxConfig())
+
+    await runner.run("true", timeout_seconds=5, workspace=Path("/tmp/ws"))
+
+    assert "--share-net" not in recorder.argv
+
+
+async def test_writable_binds_are_added_after_system_bind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host = tmp_path / "usr-local"
+    config = SandboxConfig(writable_binds={"/usr/local": str(host)})
+    recorder = patch_spawn(monkeypatch, FakeProcess(b"", b"", 0))
+    runner = BwrapRunner(config)
+
+    await runner.run("true", timeout_seconds=5, workspace=Path("/tmp/ws"))
+
+    argv = recorder.argv
+    idx = argv.index("--bind", argv.index("--bind") + 1)
+    assert argv[idx : idx + 3] == ["--bind", str(host.resolve()), "/usr/local"]
+    assert argv.index("--ro-bind") < idx
+    assert host.is_dir()
+
+
 async def test_stdout_stderr_and_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
     patch_spawn(monkeypatch, FakeProcess(b"out\n", b"err\n", 3))
     runner = BwrapRunner(SandboxConfig())

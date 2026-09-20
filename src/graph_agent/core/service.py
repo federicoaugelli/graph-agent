@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import aiosqlite
 from langchain_core.messages import AIMessage, HumanMessage
@@ -164,7 +164,7 @@ class AgentService:
     async def run(
         self,
         session_id: str,
-        user_input: str,
+        user_input: str | list[dict[str, Any]],
         *,
         approval_mode: ApprovalMode | None = None,
         system_prompt: str | None = None,
@@ -173,7 +173,7 @@ class AgentService:
             await self.setup()
 
         input_state: AgentState = {
-            "messages": [HumanMessage(content=user_input)],
+            "messages": [HumanMessage(content=cast(Any, user_input))],
             "session_id": session_id,
             "iterations": 0,
             "pending_approval": None,
