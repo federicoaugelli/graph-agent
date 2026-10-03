@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from graph_agent.tools.base import ToolContext, ToolSpec
+from graph_agent.tools.base import ToolContext, ToolSpec, resolve_within
 
 
 class FilesystemTool:
@@ -36,7 +36,7 @@ class FilesystemTool:
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> Any:
         action = args.get("action")
-        path = self._safe_path(args.get("path", "."))
+        path = resolve_within(self.root, args.get("path", "."))
         match action:
             case "read_file":
                 return path.read_text()
@@ -54,7 +54,7 @@ class FilesystemTool:
             case "mkdir":
                 path.mkdir(parents=True, exist_ok=True)
             case "move":
-                destination = self._safe_path(args["destination"])
+                destination = resolve_within(self.root, args["destination"])
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(path), str(destination))
             case "delete":
@@ -63,9 +63,3 @@ class FilesystemTool:
                 path.unlink()
             case _:
                 raise ValueError(f"unknown action: {action}")
-
-    def _safe_path(self, raw: str) -> Path:
-        candidate = (self.root / raw).resolve()
-        if not candidate.is_relative_to(self.root):
-            raise ValueError(f"path outside workspace: {raw}")
-        return candidate

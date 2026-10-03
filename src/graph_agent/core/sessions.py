@@ -5,6 +5,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
+SHARED_SESSION_KEY = "shared"
+
 
 class ThreadStore(Protocol):
     async def delete_thread(self, thread_id: str) -> None: ...
@@ -17,11 +19,11 @@ class _Session:
 
 
 class SessionManager:
-    """Maps transport sessions to LangGraph thread ids and resets them.
+    """Owns the single shared LangGraph thread used by every transport.
 
-    session key = "{channel}:{identifier}", thread id = "{key}:{generation}".
-    A reset bumps the generation and purges the previous thread's checkpoints,
-    so a fresh manager (e.g. a CLI process) starts clean by resetting before use.
+    All channels (CLI, Telegram, HTTP, realtime, voice) talk to the same brain
+    session: thread id = "{key}:{generation}". A reset bumps the generation and
+    purges the previous thread's checkpoints; an idle TTL resets it automatically.
     """
 
     def __init__(
@@ -33,33 +35,30 @@ class SessionManager:
         self.store = store
         self.ttl_seconds = ttl_minutes * 60 if ttl_minutes else None
         self._clock = clock
-        self._sessions: dict[str, _Session] = {}
+        self._session: _Session | None = None
 
-    async def thread_id(self, channel: str, identifier: str) -> str:
-        key = self._key(channel, identifier)
+    async def thread_id(self) -> str:
         now = self._clock()
-        session = self._sessions.get(key)
+        session = self._session
         if session is not None and self._expired(session, now):
-            return await self.reset(channel, identifier)
+            return await self.reset()
         if session is None:
             session = _Session(generation=1, last_seen=now)
-            self._sessions[key] = session
+            self._session = session
         else:
             session.last_seen = now
-        return self._thread(key, session.generation)
+        return self._thread(session.generation)
 
-    async def reset(self, channel: str, identifier: str) -> str:
-        key = self._key(channel, identifier)
-        previous = self._sessions.pop(key, None)
+    async def reset(self) -> str:
+        previous = self._session
         if previous is None:
             generation = 1
-            await self.store.delete_thread(self._thread(key, generation))
+            await self.store.delete_thread(self._thread(generation))
         else:
-            await self.store.delete_thread(self._thread(key, previous.generation))
+            await self.store.delete_thread(self._thread(previous.generation))
             generation = previous.generation + 1
-        thread = self._thread(key, generation)
-        self._sessions[key] = _Session(generation=generation, last_seen=self._clock())
-        return thread
+        self._session = _Session(generation=generation, last_seen=self._clock())
+        return self._thread(generation)
 
     def _expired(self, session: _Session, now: float) -> bool:
         if self.ttl_seconds is None:
@@ -67,9 +66,5 @@ class SessionManager:
         return now - session.last_seen > self.ttl_seconds
 
     @staticmethod
-    def _key(channel: str, identifier: str) -> str:
-        return f"{channel}:{identifier}"
-
-    @staticmethod
-    def _thread(key: str, generation: int) -> str:
-        return f"{key}:{generation}"
+    def _thread(generation: int) -> str:
+        return f"{SHARED_SESSION_KEY}:{generation}"

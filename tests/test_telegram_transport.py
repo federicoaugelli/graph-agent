@@ -73,6 +73,10 @@ class RecordingBot:
         self._record("answer", args, kwargs)
         return True
 
+    async def delete_message(self, *args: Any, **kwargs: Any) -> bool:
+        self._record("delete", args, kwargs)
+        return True
+
     async def send_document(self, *args: Any, **kwargs: Any) -> Message:
         self._record("send_document", args, kwargs)
         return self._make_message("")
@@ -88,6 +92,7 @@ class RecordingBot:
         entry = {
             "method": method,
             "chat_id": kwargs.get("chat_id"),
+            "message_id": kwargs.get("message_id"),
             "text": kwargs.get("text", ""),
             "parse_mode": kwargs.get("parse_mode"),
             "reply_markup": kwargs.get("reply_markup"),
@@ -121,6 +126,16 @@ class RetryAfterBot(RecordingBot):
     async def edit_message_text(self, *args: Any, **kwargs: Any) -> Message:
         raise TelegramRetryAfter(
             EditMessageText(chat_id=1, message_id=1, text="x"), "flood control", 0
+        )
+
+
+class NotModifiedBot(RecordingBot):
+    """Behaves like Telegram when the new text equals the current one."""
+
+    async def edit_message_text(self, *args: Any, **kwargs: Any) -> Message:
+        self._record("edit", args, kwargs)
+        raise TelegramBadRequest(
+            EditMessageText(chat_id=1, message_id=1, text="x"), "message is not modified"
         )
 
 
@@ -324,6 +339,78 @@ async def test_flood_control_does_not_crash_the_handler(
     await service.shutdown()
 
 
+class EchoTool:
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="echo",
+            description="Echo things.",
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+
+    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> Any:
+        return "ok"
+
+
+async def test_tool_call_shows_a_working_status(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    backend = ScriptedLLMBackend(
+        [
+            [
+                StreamChunk(
+                    tool_calls=[ToolCallRequest(id="call_echo", name="echo", args={})],
+                    finish_reason="tool_calls",
+                )
+            ],
+            text_chunks("fatto"),
+        ]
+    )
+    service = AgentService(app_config)
+    await service.setup(backend)
+    service.registry.register(EchoTool())
+    bot = TelegramBot(
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
+    )
+    recorder = RecordingBot()
+    bot.bot = recorder  # type: ignore[assignment]
+
+    await bot.handle_message(make_message("echeggia"))
+
+    assert any("Working: echo" in call["text"] for call in recorder.calls)
+    assert recorder.calls[-1]["text"] == "fatto"
+
+    await service.shutdown()
+
+
+async def test_not_modified_edit_does_not_duplicate(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    backend = ScriptedLLMBackend(
+        [[StreamChunk(delta_text="Hello "), StreamChunk(delta_text="world", finish_reason="stop")]]
+    )
+    service = AgentService(app_config)
+    await service.setup(backend)
+    bot = TelegramBot(
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
+    )
+    recorder = NotModifiedBot()
+    bot.bot = recorder  # type: ignore[assignment]
+
+    await bot.handle_message(make_message("saluta"))
+
+    duplicates = [
+        call
+        for call in recorder.calls
+        if call["method"] == "send" and call["text"] == "Hello world"
+    ]
+    assert duplicates == []
+
+    await service.shutdown()
+
+
 async def test_command_menu_is_published(bot_env: Any) -> None:
     bot, recorder, _, _ = bot_env
 
@@ -331,7 +418,33 @@ async def test_command_menu_is_published(bot_env: Any) -> None:
 
     published = next(c for c in recorder.calls if c["method"] == "set_my_commands")
     assert published["commands"] == COMMANDS
-    assert [command.command for command in published["commands"]] == ["new", "auto", "manual"]
+    assert [command.command for command in published["commands"]] == [
+        "new",
+        "auto",
+        "manual",
+        "context",
+        "compact",
+    ]
+
+
+async def test_context_command_reports_stats(bot_env: Any) -> None:
+    bot, recorder, _, _ = bot_env
+    await bot.handle_message(make_message("ciao"))
+    recorder.calls.clear()
+
+    await bot.handle_message(make_message("/context"))
+
+    reply = recorder.calls[-1]["text"]
+    assert "Context:" in reply
+    assert "tokens" in reply
+
+
+async def test_compact_command_reports_nothing_to_do(bot_env: Any) -> None:
+    bot, recorder, _, _ = bot_env
+
+    await bot.handle_message(make_message("/compact"))
+
+    assert recorder.calls[-1]["text"] == "Not enough context to compact."
 
 
 async def test_typing_action_precedes_output(bot_env: Any) -> None:
@@ -400,7 +513,7 @@ async def test_html_failure_falls_back_to_plain_text(
     await service.shutdown()
 
 
-async def test_telegram_session_is_chat_id_and_persists(
+async def test_telegram_uses_the_shared_session(
     app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
@@ -426,7 +539,7 @@ async def test_telegram_session_is_chat_id_and_persists(
 
     third_turn = [m.content for m in backend.calls[2]]
     assert "tre" in third_turn
-    assert "uno" not in third_turn
+    assert "uno" in third_turn
 
     await service.shutdown()
 
@@ -479,6 +592,23 @@ async def test_callback_approve_resumes_and_executes(
     assert tool.executed == [{"text": "boom"}]
     assert any(call["method"] == "answer" for call in recorder.calls)
     assert recorder.calls[-1]["text"] == "end"
+
+    await service.shutdown()
+
+
+async def test_callback_deletes_approval_message(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot, recorder, _, service = await make_approval_bot(app_config, monkeypatch)
+    await bot.handle_message(make_message("do it"))
+    recorder.calls.clear()
+
+    await bot.handle_approval_callback(make_callback(f"{APPROVE_PREFIX}call_1"))
+
+    deletes = [call for call in recorder.calls if call["method"] == "delete"]
+    assert len(deletes) == 1
+    assert deletes[0]["chat_id"] == CHAT_ID
+    assert deletes[0]["message_id"] == 56
 
     await service.shutdown()
 
@@ -552,7 +682,7 @@ async def test_manual_command_reenables_approvals(
     await service.shutdown()
 
 
-async def test_approval_mode_is_per_chat(
+async def test_approval_mode_is_shared(
     app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bot, recorder, tool, service = await make_approval_bot(app_config, monkeypatch)
@@ -560,8 +690,8 @@ async def test_approval_mode_is_per_chat(
 
     await bot.handle_message(make_message("do it", chat_id=222, user_id=USER_ID))
 
-    assert tool.executed == []
-    assert any(call["reply_markup"] is not None for call in recorder.calls)
+    assert tool.executed == [{"text": "boom"}]
+    assert all(call["reply_markup"] is None for call in recorder.calls)
 
     await service.shutdown()
 

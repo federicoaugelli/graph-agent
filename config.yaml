@@ -21,6 +21,10 @@ agent:
   checkpointer_db: data/checkpoints.sqlite
   # hard-reset a session after this many minutes of inactivity (null = never)
   session_ttl_minutes: null
+  # automatic compaction: once the context exceeds this many tokens, older
+  # messages are summarized (keeping the last ones verbatim). 0 disables it.
+  context_token_limit: 200000
+  compaction_keep_messages: 20
 
 memory:
   enabled: true
@@ -70,9 +74,40 @@ channels:
     backend: openai
     model: ""
     # openai: LiteLLM base (http://localhost:4000)
-    # qwen:   full realtime URL, e.g. wss://<workspace>.<region>.maas.aliyuncs.com/api-ws/v1/realtime
+    # qwen:   full realtime URL, e.g. wss://<host>/api-ws/v1/realtime
     api_base: http://localhost:4000
     # api_key_env: LITELLM_API_KEY
+    # lean switchboard prompt: by default only the agent persona/system_prompt is
+    # sent (no skills/memory/tool details). Override with a short custom prompt here.
+    # instructions: "You are the voice front desk of my assistant."
+  voice:
+    # Asterisk AudioSocket server (telephony bridge). The dialplan calls
+    # AudioSocket(uuid, <host>:<port>); the phone leg is bridged to the
+    # realtime backend above, reusing delegate_to_brain.
+    enabled: false
+    host: 0.0.0.0
+    port: 8101
+    # PCM rate of the audio going IN (telephony -> backend). Qwen input ~16000.
+    sample_rate: 16000
+    # PCM rate of the backend audio OUT (backend -> telephony). Qwen output ~24000,
+    # OpenAI ~24000. Defaults to sample_rate when omitted.
+    output_sample_rate: 24000
+    # optional: make the brain speak first with this instruction
+    # greeting: "Saluta in italiano e chiedi come puoi aiutare."
+    # --- outbound (agent places calls through Asterisk AMI) ---
+    # address Asterisk dials back to reach this AudioSocket server (required to
+    # register the call_phone tool / voice sink). It is written in Originate Data.
+    # advertise_host: <agent-host>
+    # trunk: trunk
+    # caller_id: "caller id"
+    # default target dialed when the agent calls without an explicit number
+    # default_target: "target cellphone"
+    # Asterisk AMI: use the CT's routable address (agents on another host may be
+    # NATed by their gateway, so allow that source IP in manager.conf `permit`)
+    # ami_host: <asterisk-host>
+    # ami_port: 5038
+    # ami_username: graphagent
+    # ami_secret_env: ASTERISK_AMI_SECRET
 
 scheduler:
   enabled: false

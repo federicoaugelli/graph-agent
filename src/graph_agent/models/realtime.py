@@ -83,12 +83,26 @@ def auth_headers(config: RealtimeChannelConfig, *, beta: bool = False) -> dict[s
     return headers
 
 
-class OpenAIRealtimeBackend:
-    """Backend for any OpenAI-compatible realtime endpoint (LiteLLM proxy, OpenAI, ...)."""
+class ConnectionBackend:
+    """Shared lifecycle for WebSocket-backed realtime providers."""
 
     def __init__(self, config: RealtimeChannelConfig) -> None:
         self.config = config
         self._conn: WebSocketConnection | None = None
+
+    async def close(self) -> None:
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
+
+    def _require(self) -> WebSocketConnection:
+        if self._conn is None:
+            raise RuntimeError("realtime backend is not connected")
+        return self._conn
+
+
+class OpenAIRealtimeBackend(ConnectionBackend):
+    """Backend for any OpenAI-compatible realtime endpoint (LiteLLM proxy, OpenAI, ...)."""
 
     async def connect(self) -> None:
         ws = await websockets.connect(
@@ -103,16 +117,6 @@ class OpenAIRealtimeBackend:
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         async for event in self._require().events():
             yield event
-
-    async def close(self) -> None:
-        if self._conn is not None:
-            await self._conn.close()
-            self._conn = None
-
-    def _require(self) -> WebSocketConnection:
-        if self._conn is None:
-            raise RuntimeError("realtime backend is not connected")
-        return self._conn
 
 
 def build_realtime_backend(config: RealtimeChannelConfig) -> RealtimeBackend:

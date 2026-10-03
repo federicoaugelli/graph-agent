@@ -15,7 +15,6 @@ async def _cmd_cli(config: AppConfig) -> None:
     service = AgentService(config)
     await service.setup()
     sessions = SessionManager(service, ttl_minutes=config.agent.session_ttl_minutes)
-    await sessions.reset("cli", "local")
     try:
         await run_cli(service, sessions)
     finally:
@@ -33,16 +32,33 @@ async def _cmd_serve(config: AppConfig) -> None:
     sessions = SessionManager(service, ttl_minutes=config.agent.session_ttl_minutes)
 
     realtime = None
-    if config.channels.realtime.enabled:
+    if config.channels.realtime.enabled or config.channels.voice.enabled:
         from graph_agent.transports.realtime import RealtimeBridge
 
         realtime = RealtimeBridge(service, config.channels.realtime)
 
-    app = create_app(service, config, sessions, realtime)
+    http_realtime = realtime if config.channels.realtime.enabled else None
+    app = create_app(service, config, sessions, http_realtime)
     http = config.channels.http
     server = uvicorn.Server(uvicorn.Config(app, host=http.host, port=http.port, log_level="info"))
 
     tasks = [asyncio.create_task(server.serve())]
+
+    voice = None
+    if config.channels.voice.enabled and realtime is not None:
+        from graph_agent.transports.voice import AudioSocketServer
+
+        voice = AudioSocketServer(realtime, config.channels.voice, sessions)
+        await voice.start()
+        tasks.append(asyncio.create_task(voice.serve_forever()))
+
+    voice_outbound = None
+    if voice is not None and config.channels.voice.advertise_host:
+        from graph_agent.transports.voice import CallPhoneTool, OutboundCaller
+
+        voice_outbound = OutboundCaller(voice, config.channels.voice)
+        service.registry.register(CallPhoneTool(voice_outbound))
+
     telegram = None
     if config.channels.telegram.enabled:
         from graph_agent.transports.telegram import TelegramBot
@@ -97,6 +113,11 @@ async def _cmd_serve(config: AppConfig) -> None:
 
             scheduler.register_sink("telegram", TelegramSink())
 
+        if voice_outbound is not None:
+            from graph_agent.transports.voice import VoiceSink
+
+            scheduler.register_sink("voice", VoiceSink(voice_outbound, config.channels.voice))
+
     try:
         await asyncio.gather(*tasks)
     finally:
@@ -105,6 +126,8 @@ async def _cmd_serve(config: AppConfig) -> None:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if voice is not None:
+            await voice.stop()
         if telegram is not None:
             await telegram.stop()
         await service.shutdown()

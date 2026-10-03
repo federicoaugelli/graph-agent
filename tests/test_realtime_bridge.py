@@ -90,6 +90,37 @@ async def test_client_to_backend_passthrough(app_config: AppConfig) -> None:
     await service.shutdown()
 
 
+async def test_realtime_instructions_are_lean(app_config: AppConfig) -> None:
+    app_config.agent.system_prompt = "Persona base"
+    app_config.memory.enabled = True
+    service = AgentService(app_config)
+    await service.setup(fake_text_response("ok"))
+    bridge = RealtimeBridge(service, realtime_config())
+
+    instructions = bridge._session_instructions()
+
+    assert "Persona base" in instructions
+    assert DELEGATE_INSTRUCTION in instructions
+    assert "MEMORY.md" not in instructions
+    await service.shutdown()
+
+
+async def test_realtime_instructions_config_overrides_persona(app_config: AppConfig) -> None:
+    app_config.agent.system_prompt = "Persona base"
+    service = AgentService(app_config)
+    await service.setup(fake_text_response("ok"))
+    config = RealtimeChannelConfig(
+        enabled=True, backend="openai", model="fake-realtime", instructions="Centralino"
+    )
+    bridge = RealtimeBridge(service, config)
+
+    instructions = bridge._session_instructions()
+
+    assert instructions.startswith("Centralino")
+    assert "Persona base" not in instructions
+    await service.shutdown()
+
+
 async def test_backend_to_client_declares_tool_and_delegates(app_config: AppConfig) -> None:
     llm = fake_text_response("risposta dell'agente")
     service = AgentService(app_config)
@@ -295,4 +326,4 @@ def test_realtime_ws_accepts_query_token(
         pass
 
     assert len(bridge.sessions) == 1
-    assert bridge.sessions[0].startswith("realtime:")
+    assert bridge.sessions[0] == "shared:1"

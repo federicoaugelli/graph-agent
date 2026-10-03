@@ -31,12 +31,11 @@ def test_build_openai_url_keeps_existing_realtime_path() -> None:
 def test_build_qwen_url_uses_full_api_base() -> None:
     config = RealtimeChannelConfig(
         backend="qwen",
-        api_base="wss://ws123.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime",
+        api_base="wss://example.test/api-ws/v1/realtime",
         model="qwen-audio-3.0-realtime-plus",
     )
     assert build_qwen_url(config) == (
-        "wss://ws123.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"
-        "?model=qwen-audio-3.0-realtime-plus"
+        "wss://example.test/api-ws/v1/realtime?model=qwen-audio-3.0-realtime-plus"
     )
 
 

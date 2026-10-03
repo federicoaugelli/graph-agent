@@ -14,5 +14,7 @@ data/
 *.sqlite
 *.lance/
 .direnv/
+# private working notes / agent scratchpads (never published)
 AGENTS.md
 todo.md
+deploy/voip-asterisk.md

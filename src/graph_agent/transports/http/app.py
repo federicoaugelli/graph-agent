@@ -25,7 +25,6 @@ from graph_agent.events import (
 from graph_agent.transports.realtime.bridge import RealtimeBridge, StarletteWebSocketConnection
 
 DEFAULT_SESSION_ID = "default"
-CHANNEL = "http"
 NEW_COMMAND = "/new"
 
 HTTP_SYSTEM_PROMPT = """\
@@ -68,12 +67,6 @@ class ChatCompletionChoice(BaseModel):
     index: int = 0
     message: ChatMessage
     finish_reason: str = "stop"
-
-
-class Usage(BaseModel):
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
 
 
 class ChatCompletionResponse(BaseModel):
@@ -205,7 +198,7 @@ def create_app(
         await websocket.accept()
         client = StarletteWebSocketConnection(websocket)
         try:
-            await realtime.handle(client, f"realtime:{uuid4().hex}")
+            await realtime.handle(client, await sessions.thread_id())
         except WebSocketDisconnect:
             pass
         finally:
@@ -261,7 +254,7 @@ def create_app(
         user_input = request.messages[-1].content
 
         if user_input.strip() == NEW_COMMAND:
-            thread_id = await sessions.reset(CHANNEL, identifier)
+            thread_id = await sessions.reset()
             text = f"[new session] {thread_id}"
             if request.stream:
                 return StreamingResponse(
@@ -270,7 +263,7 @@ def create_app(
                 )
             return _completion_body(request.model, text, None, identifier)
 
-        thread_id = await sessions.thread_id(CHANNEL, identifier)
+        thread_id = await sessions.thread_id()
 
         if request.stream:
             stream = service.run(
@@ -298,7 +291,7 @@ def create_app(
     async def resolve_approval(
         session_id: str, approval_id: str, request: ResumeRequest
     ) -> dict[str, Any]:
-        thread_id = await sessions.thread_id(CHANNEL, session_id)
+        thread_id = await sessions.thread_id()
         pending = await service.pending_approval(thread_id)
         if pending is None or pending.approval_id != approval_id:
             raise HTTPException(

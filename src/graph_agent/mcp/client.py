@@ -49,7 +49,6 @@ class MCPClientManager:
 
     def __init__(self, servers: list[MCPServerConfig]) -> None:
         self.servers = servers
-        self._sessions: dict[str, ClientSession] = {}
         self._tools: list[MCPTool] = []
         self._stack: AsyncExitStack | None = None
 
@@ -75,7 +74,6 @@ class MCPClientManager:
         read, write = await stack.enter_async_context(stdio_client(params))
         session = await stack.enter_async_context(ClientSession(read, write))
         await session.initialize()
-        self._sessions[server.name] = session
 
         listed = await session.list_tools()
         for tool in listed.tools:
@@ -92,7 +90,6 @@ class MCPClientManager:
     async def shutdown(self) -> None:
         stack = self._stack
         self._stack = None
-        self._sessions.clear()
         self._tools.clear()
         if stack is not None:
             await stack.aclose()
@@ -103,10 +100,6 @@ class MCPClientManager:
             registry.register(tool)
             registered.append(tool)
         return registered
-
-    @property
-    def tools(self) -> list[MCPTool]:
-        return list(self._tools)
 
 
 def _server_env(server: MCPServerConfig) -> dict[str, str] | None:

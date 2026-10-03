@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from graph_agent.events import FileEvent
-from graph_agent.tools.base import ToolContext, ToolSpec
+from graph_agent.tools.base import ToolContext, ToolSpec, resolve_within
 
 
 class SendFileTool:
@@ -38,10 +38,7 @@ class SendFileTool:
         if not raw:
             raise ValueError("send_file requires 'path'")
 
-        root = ctx.workspace.resolve()
-        candidate = (root / raw).resolve()
-        if not candidate.is_relative_to(root):
-            raise ValueError(f"path outside workspace: {raw}")
+        candidate = resolve_within(ctx.workspace, raw)
         if not candidate.is_file():
             raise ValueError(f"not a file: {raw}")
 

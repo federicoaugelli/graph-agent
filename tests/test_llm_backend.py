@@ -1,158 +1,81 @@
 from __future__ import annotations
 
-import json
-from types import SimpleNamespace
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import pytest
-from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
+from langchain_core.messages import AIMessageChunk, BaseMessage, HumanMessage
 
 from graph_agent.config import ModelConfig
-from graph_agent.models.llm import OpenAICompatBackend, to_openai_messages
+from graph_agent.models.llm import OpenAICompatBackend
 
 
-def _delta(
-    content: str | None = None,
-    tool_calls: list[Any] | None = None,
-) -> Any:
-    return SimpleNamespace(content=content, tool_calls=tool_calls)
-
-
-def _chunk(
-    content: str | None = None,
-    tool_calls: list[Any] | None = None,
-    finish_reason: str | None = None,
-) -> Any:
-    choice = SimpleNamespace(delta=_delta(content, tool_calls), finish_reason=finish_reason)
-    return SimpleNamespace(choices=[choice])
-
-
-def _tool_call_delta(
-    index: int = 0,
-    id: str | None = None,
-    name: str | None = None,
-    arguments: str | None = None,
-) -> Any:
-    return SimpleNamespace(
-        index=index,
-        id=id,
-        function=SimpleNamespace(name=name, arguments=arguments),
-    )
-
-
-class FakeCompletions:
-    def __init__(self, chunks: list[Any]) -> None:
+class FakeChatModel:
+    def __init__(self, chunks: list[AIMessageChunk]) -> None:
         self.chunks = chunks
-        self.calls: list[dict[str, Any]] = []
+        self.bound_tools: list[Any] | None = None
+        self.calls: list[list[BaseMessage]] = []
 
-    async def create(self, **kwargs: Any) -> Any:
-        self.calls.append(kwargs)
+    def bind_tools(self, tools: list[dict[str, Any]], **kwargs: Any) -> FakeChatModel:
+        self.bound_tools = list(tools)
+        return self
 
-        async def gen() -> Any:
-            for chunk in self.chunks:
-                yield chunk
+    async def astream(
+        self, messages: list[BaseMessage], **kwargs: Any
+    ) -> AsyncIterator[AIMessageChunk]:
+        self.calls.append(messages)
+        for chunk in self.chunks:
+            yield chunk
 
-        return gen()
 
-
-def fake_backend(chunks: list[Any], **config_kwargs: Any) -> tuple[OpenAICompatBackend, Any]:
-    completions = FakeCompletions(chunks)
-    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+def fake_backend(
+    chunks: list[AIMessageChunk], **config_kwargs: Any
+) -> tuple[OpenAICompatBackend, FakeChatModel]:
+    model = FakeChatModel(chunks)
     backend = OpenAICompatBackend(
         ModelConfig(model="fake-brain", api_base="http://localhost:4000", **config_kwargs),
-        client=client,  # type: ignore[arg-type]
+        model=cast(Any, model),
     )
-    return backend, completions
+    return backend, model
 
 
-def test_to_openai_messages_basic() -> None:
-    messages: list[BaseMessage] = [
-        SystemMessage(content="sei utile"),
-        HumanMessage(content="hello"),
-    ]
-    out = to_openai_messages(messages)
-    assert out == [
-        {"role": "system", "content": "sei utile"},
-        {"role": "user", "content": "hello"},
-    ]
+def text_chunk(text: str, finish_reason: str | None = None) -> AIMessageChunk:
+    return AIMessageChunk(content=text, response_metadata={"finish_reason": finish_reason})
 
 
-def test_to_openai_messages_keeps_multimodal_parts() -> None:
-    content = [
-        {"type": "text", "text": "what is this?"},
-        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}},
-    ]
-    messages: list[BaseMessage] = [HumanMessage(content=content)]
-
-    out = to_openai_messages(messages)
-
-    assert out == [{"role": "user", "content": content}]
-
-
-def test_to_openai_messages_tool_roundtrip() -> None:
-    messages: list[BaseMessage] = [
-        HumanMessage(content="leggi a.txt"),
-        AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "id": "call_1",
-                    "name": "filesystem",
-                    "args": {"action": "read_file", "path": "a.txt"},
-                    "type": "tool_call",
-                }
-            ],
-        ),
-        ToolMessage(content="contenuto", tool_call_id="call_1"),
-    ]
-    out = to_openai_messages(messages)
-    assert out[1]["role"] == "assistant"
-    tool_calls = out[1]["tool_calls"]
-    assert tool_calls[0]["id"] == "call_1"
-    assert tool_calls[0]["type"] == "function"
-    assert tool_calls[0]["function"]["name"] == "filesystem"
-    assert json.loads(tool_calls[0]["function"]["arguments"]) == {
-        "action": "read_file",
-        "path": "a.txt",
-    }
-    assert out[2] == {"role": "tool", "content": "contenuto", "tool_call_id": "call_1"}
+def tool_chunk(
+    index: int,
+    id: str | None = None,
+    name: str | None = None,
+    args: str | None = None,
+    finish_reason: str | None = None,
+) -> AIMessageChunk:
+    return AIMessageChunk(
+        content="",
+        tool_call_chunks=[{"index": index, "id": id, "name": name, "args": args}],
+        response_metadata={"finish_reason": finish_reason},
+    )
 
 
 async def test_astream_text() -> None:
-    backend, completions = fake_backend(
-        [
-            _chunk(content="Hello "),
-            _chunk(content="world"),
-            _chunk(finish_reason="stop"),
-        ]
-    )
+    backend, model = fake_backend([text_chunk("Hello "), text_chunk("world", "stop")])
 
     chunks = [chunk async for chunk in backend.astream([HumanMessage(content="hi")])]
 
     assert "".join(chunk.delta_text for chunk in chunks) == "Hello world"
     assert chunks[-1].finish_reason == "stop"
     assert all(not chunk.tool_calls for chunk in chunks)
-
-    call = completions.calls[0]
-    assert call["model"] == "fake-brain"
-    assert call["stream"] is True
-    assert call["messages"] == [{"role": "user", "content": "hi"}]
+    assert model.calls[0] == [HumanMessage(content="hi")]
 
 
 async def test_astream_tool_call_assembled() -> None:
     backend, _ = fake_backend(
         [
-            _chunk(tool_calls=[_tool_call_delta(id="call_1", name="filesystem")]),
-            _chunk(tool_calls=[_tool_call_delta(arguments='{"act')]),
-            _chunk(tool_calls=[_tool_call_delta(arguments='ion": "read_file",')]),
-            _chunk(tool_calls=[_tool_call_delta(arguments=' "path": "a.txt"}')]),
-            _chunk(finish_reason="tool_calls"),
+            tool_chunk(0, id="call_1", name="filesystem"),
+            tool_chunk(0, args='{"act'),
+            tool_chunk(0, args='ion": "read_file",'),
+            tool_chunk(0, args=' "path": "a.txt"}'),
+            tool_chunk(0, finish_reason="tool_calls"),
         ]
     )
 
@@ -163,16 +86,17 @@ async def test_astream_tool_call_assembled() -> None:
     assert tool_calls[0].id == "call_1"
     assert tool_calls[0].name == "filesystem"
     assert tool_calls[0].args == {"action": "read_file", "path": "a.txt"}
+    assert chunks[-1].finish_reason == "tool_calls"
 
 
 async def test_astream_two_parallel_tool_calls() -> None:
     backend, _ = fake_backend(
         [
-            _chunk(tool_calls=[_tool_call_delta(index=0, id="a", name="filesystem")]),
-            _chunk(tool_calls=[_tool_call_delta(index=1, id="b", name="web_search")]),
-            _chunk(tool_calls=[_tool_call_delta(index=0, arguments='{"path": "."}')]),
-            _chunk(tool_calls=[_tool_call_delta(index=1, arguments='{"query": "x"}')]),
-            _chunk(finish_reason="tool_calls"),
+            tool_chunk(0, id="a", name="filesystem"),
+            tool_chunk(1, id="b", name="web_search"),
+            tool_chunk(0, args='{"path": "."}'),
+            tool_chunk(1, args='{"query": "x"}'),
+            tool_chunk(0, finish_reason="tool_calls"),
         ]
     )
 
@@ -188,28 +112,17 @@ async def test_astream_two_parallel_tool_calls() -> None:
     assert by_id["b"] == {"query": "x"}
 
 
-async def test_astream_passes_tools_and_params() -> None:
-    backend, completions = fake_backend(
-        [_chunk(finish_reason="stop")], temperature=0.5, max_tokens=123
-    )
-
+async def test_astream_binds_tools() -> None:
+    backend, model = fake_backend([text_chunk("ok", "stop")])
     tools = [{"type": "function", "function": {"name": "echo"}}]
+
     _ = [chunk async for chunk in backend.astream([HumanMessage(content="hi")], tools=tools)]
 
-    call = completions.calls[0]
-    assert call["tools"] == tools
-    assert call["temperature"] == 0.5
-    assert call["max_tokens"] == 123
+    assert model.bound_tools == tools
 
 
 async def test_acomplete_aggregates() -> None:
-    backend, _ = fake_backend(
-        [
-            _chunk(content="ab"),
-            _chunk(content="cd"),
-            _chunk(finish_reason="stop"),
-        ]
-    )
+    backend, _ = fake_backend([text_chunk("ab"), text_chunk("cd", "stop")])
 
     result = await backend.acomplete([HumanMessage(content="hi")])
 
@@ -217,7 +130,7 @@ async def test_acomplete_aggregates() -> None:
     assert result.finish_reason == "stop"
 
 
-def test_default_client_reads_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_model_reads_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FAKE_KEY_ENV", "sk-test")
     backend = OpenAICompatBackend(
         ModelConfig(
@@ -226,5 +139,7 @@ def test_default_client_reads_api_key_from_env(monkeypatch: pytest.MonkeyPatch) 
             api_key_env="FAKE_KEY_ENV",
         )
     )
-    assert str(backend.client.base_url).startswith("http://localhost:4000")
-    assert backend.client.api_key == "sk-test"
+
+    assert backend.model.model_name == "fake-brain"
+    assert backend.model.openai_api_base == "http://localhost:4000"
+    assert backend.model.openai_api_key.get_secret_value() == "sk-test"

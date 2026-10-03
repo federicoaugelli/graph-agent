@@ -25,7 +25,3 @@ class EventBus:
     async def publish(self, topic: str, event: Event) -> None:
         for queue in self._topics.get(topic, []):
             await queue.put(event)
-
-    async def publish_all(self, topic: str, events: list[Event]) -> None:
-        for event in events:
-            await self.publish(topic, event)

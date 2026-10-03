@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from langchain_core.utils.function_calling import convert_to_openai_tool
+
 from graph_agent.config import AppConfig
 
 
@@ -29,6 +31,15 @@ class Tool(Protocol):
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> Any: ...
 
 
+def resolve_within(root: Path, raw: str) -> Path:
+    """Resolve ``raw`` under ``root``, rejecting paths that escape it."""
+    base = root.resolve()
+    resolved = (base / raw).resolve()
+    if not resolved.is_relative_to(base):
+        raise ValueError(f"path outside workspace: {raw}")
+    return resolved
+
+
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
@@ -47,13 +58,12 @@ class ToolRegistry:
 
     def to_openai_schema(self) -> list[dict[str, Any]]:
         return [
-            {
-                "type": "function",
-                "function": {
+            convert_to_openai_tool(
+                {
                     "name": tool.spec.name,
                     "description": tool.spec.description,
                     "parameters": tool.spec.parameters,
-                },
-            }
+                }
+            )
             for tool in self._tools.values()
         ]

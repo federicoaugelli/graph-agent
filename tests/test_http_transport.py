@@ -135,7 +135,7 @@ async def test_completion_streams_sse(app_config: AppConfig) -> None:
     await service.shutdown()
 
 
-async def test_user_field_maps_to_session(app_config: AppConfig) -> None:
+async def test_all_users_share_one_session(app_config: AppConfig) -> None:
     backend = ScriptedLLMBackend(
         [
             text_chunks("answer-1"),
@@ -158,11 +158,11 @@ async def test_user_field_maps_to_session(app_config: AppConfig) -> None:
     await ask("bob", "due")
     await ask("alice", "tre")
 
-    alice_last = backend.calls[-1]
-    contents = [message.content for message in alice_last]
+    last = backend.calls[-1]
+    contents = [message.content for message in last]
     assert "uno" in contents
     assert "answer-1" in contents
-    assert "due" not in contents
+    assert "due" in contents
 
     await client.aclose()
     await service.shutdown()
@@ -241,7 +241,7 @@ async def test_approvals_endpoint_resumes_manual_session(app_config: AppConfig) 
     sessions = SessionManager(service)
     client = make_client(service, app_config, sessions)
 
-    thread_id = await sessions.thread_id("http", "dave")
+    thread_id = await sessions.thread_id()
     events = [event async for event in service.run(thread_id, "burn")]
     assert isinstance(events[0], ApprovalRequestEvent)
     assert tool.executed == []

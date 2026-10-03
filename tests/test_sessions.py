@@ -16,14 +16,14 @@ class FakeStore:
         self.deleted.append(thread_id)
 
 
-async def test_thread_id_is_stable() -> None:
+async def test_thread_id_is_stable_and_shared() -> None:
     store = FakeStore()
     sessions = SessionManager(store)
 
-    first = await sessions.thread_id("cli", "local")
-    second = await sessions.thread_id("cli", "local")
+    first = await sessions.thread_id()
+    second = await sessions.thread_id()
 
-    assert first == "cli:local:1"
+    assert first == "shared:1"
     assert second == first
     assert store.deleted == []
 
@@ -31,44 +31,44 @@ async def test_thread_id_is_stable() -> None:
 async def test_reset_bumps_generation_and_purges_previous() -> None:
     store = FakeStore()
     sessions = SessionManager(store)
-    first = await sessions.thread_id("cli", "local")
+    first = await sessions.thread_id()
 
-    second = await sessions.reset("cli", "local")
+    second = await sessions.reset()
 
-    assert first == "cli:local:1"
-    assert second == "cli:local:2"
-    assert store.deleted == ["cli:local:1"]
+    assert first == "shared:1"
+    assert second == "shared:2"
+    assert store.deleted == ["shared:1"]
 
 
 async def test_reset_from_cold_purges_target_thread() -> None:
     store = FakeStore()
     sessions = SessionManager(store)
 
-    assert await sessions.reset("cli", "local") == "cli:local:1"
-    assert store.deleted == ["cli:local:1"]
+    assert await sessions.reset() == "shared:1"
+    assert store.deleted == ["shared:1"]
 
 
 async def test_ttl_expiry_resets() -> None:
     store = FakeStore()
     now = [0.0]
     sessions = SessionManager(store, ttl_minutes=1, clock=lambda: now[0])
-    assert await sessions.thread_id("cli", "local") == "cli:local:1"
+    assert await sessions.thread_id() == "shared:1"
 
     now[0] = 61.0
 
-    assert await sessions.thread_id("cli", "local") == "cli:local:2"
-    assert store.deleted == ["cli:local:1"]
+    assert await sessions.thread_id() == "shared:2"
+    assert store.deleted == ["shared:1"]
 
 
 async def test_no_ttl_keeps_thread_id() -> None:
     store = FakeStore()
     now = [0.0]
     sessions = SessionManager(store, clock=lambda: now[0])
-    assert await sessions.thread_id("cli", "local") == "cli:local:1"
+    assert await sessions.thread_id() == "shared:1"
 
     now[0] = 10_000.0
 
-    assert await sessions.thread_id("cli", "local") == "cli:local:1"
+    assert await sessions.thread_id() == "shared:1"
 
 
 async def test_delete_thread_purges_checkpoints(app_config: AppConfig) -> None:

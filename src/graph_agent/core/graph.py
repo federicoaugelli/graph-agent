@@ -12,6 +12,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
 from graph_agent.config import AppConfig
+from graph_agent.core.compaction import compact
 from graph_agent.core.state import AgentState, resolve_approval_mode
 from graph_agent.events import ErrorEvent, FileEvent, TokenEvent, ToolCallEvent, ToolResultEvent
 from graph_agent.models.llm import LLMBackend
@@ -28,7 +29,20 @@ def build_agent_graph(
     resolved_max_iterations = (
         max_iterations if max_iterations is not None else config.agent.max_iterations
     )
+    resolved_token_limit = config.agent.context_token_limit
+    resolved_keep = config.agent.compaction_keep_messages
     workspace = Path(config.agent.workspace)
+
+    async def compact_node(state: AgentState) -> dict[str, object]:
+        replacement = await compact(
+            backend,
+            list(state["messages"]),
+            token_limit=resolved_token_limit,
+            keep=resolved_keep,
+        )
+        if replacement is None:
+            return {}
+        return {"messages": replacement}
 
     async def agent_node(state: AgentState) -> dict[str, object]:
         writer = get_stream_writer()
@@ -177,16 +191,18 @@ def build_agent_graph(
 
         return "end"
 
-    builder = new_state_graph()
+    builder = StateGraph(AgentState)
+    builder.add_node("compact", compact_node)
     builder.add_node("agent", agent_node)
     builder.add_node("tools", tools_node)
-    builder.add_edge(START, "agent")
+    builder.add_edge(START, "compact")
+    builder.add_edge("compact", "agent")
     builder.add_conditional_edges(
         "agent",
         should_continue,
         {"tools": "tools", "end": END},
     )
-    builder.add_edge("tools", "agent")
+    builder.add_edge("tools", "compact")
 
     return builder.compile(checkpointer=checkpointer)
 
@@ -195,7 +211,3 @@ def _tool_message_content(result: Any) -> str:
     if isinstance(result, str):
         return result
     return json.dumps(result, ensure_ascii=False, default=str)
-
-
-def new_state_graph() -> StateGraph[AgentState]:
-    return StateGraph(AgentState)

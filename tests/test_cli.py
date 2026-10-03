@@ -71,7 +71,7 @@ async def test_cli_approves_and_resumes(
     scripted_input(monkeypatch, ["burn", "y"])
 
     try:
-        await run_cli(service, SessionManager(service), identifier="test")
+        await run_cli(service, SessionManager(service))
     finally:
         await service.shutdown()
 
@@ -83,7 +83,7 @@ async def test_cli_denies_on_n(app_config: AppConfig, monkeypatch: pytest.Monkey
     scripted_input(monkeypatch, ["burn", "n"])
 
     try:
-        await run_cli(service, SessionManager(service), identifier="test")
+        await run_cli(service, SessionManager(service))
     finally:
         await service.shutdown()
 
@@ -108,11 +108,11 @@ async def test_cli_new_starts_a_new_thread(
     scripted_input(monkeypatch, ["/new", "hello"])
 
     try:
-        await run_cli(service, sessions, identifier="test")
+        await run_cli(service, sessions)
     finally:
         await service.shutdown()
 
-    assert seen == ["cli:test:2"]
+    assert seen == ["shared:2"]
 
 
 def test_render_file_event(capsys: pytest.CaptureFixture[str]) -> None:
@@ -130,7 +130,7 @@ async def test_cli_eof_at_approval_denies(
     scripted_input(monkeypatch, ["burn"])
 
     try:
-        await run_cli(service, SessionManager(service), identifier="test")
+        await run_cli(service, SessionManager(service))
     finally:
         await service.shutdown()
 

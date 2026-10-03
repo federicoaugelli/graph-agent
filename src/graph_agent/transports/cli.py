@@ -20,13 +20,8 @@ from graph_agent.events import (
 NEW_COMMAND = "/new"
 
 
-async def run_cli(
-    service: AgentService,
-    sessions: SessionManager,
-    channel: str = "cli",
-    identifier: str = "local",
-) -> None:
-    session_id = await sessions.thread_id(channel, identifier)
+async def run_cli(service: AgentService, sessions: SessionManager) -> None:
+    session_id = await sessions.thread_id()
     print(f"graph-agent CLI - session '{session_id}' (Ctrl-D to exit, {NEW_COMMAND} to reset)")
     loop = asyncio.get_running_loop()
     while True:
@@ -38,7 +33,7 @@ async def run_cli(
         if not user_input:
             continue
         if user_input == NEW_COMMAND:
-            session_id = await sessions.reset(channel, identifier)
+            session_id = await sessions.reset()
             print(f"[new session] {session_id}")
             continue
         stream = service.run(session_id, user_input)

@@ -24,7 +24,14 @@ from graph_agent.config import TelegramChannelConfig
 from graph_agent.core.service import AgentService
 from graph_agent.core.sessions import SessionManager
 from graph_agent.core.state import ApprovalMode
-from graph_agent.events import ApprovalRequestEvent, ErrorEvent, Event, FileEvent, TokenEvent
+from graph_agent.events import (
+    ApprovalRequestEvent,
+    ErrorEvent,
+    Event,
+    FileEvent,
+    TokenEvent,
+    ToolCallEvent,
+)
 from graph_agent.media import image_content_part, is_image
 from graph_agent.transports.telegram.formatting import (
     escape_html,
@@ -41,18 +48,24 @@ DENY_PREFIX = "deny:"
 AUTO_COMMAND = "/auto"
 MANUAL_COMMAND = "/manual"
 NEW_COMMAND = "/new"
+CONTEXT_COMMAND = "/context"
+COMPACT_COMMAND = "/compact"
 
 COMMANDS: list[BotCommand] = [
     BotCommand(command="new", description="Start a fresh session"),
     BotCommand(command="auto", description="Approve sensitive tools automatically"),
     BotCommand(command="manual", description="Ask before sensitive tools"),
+    BotCommand(command="context", description="Show the current context size"),
+    BotCommand(command="compact", description="Summarize the context now"),
 ]
 
-CHANNEL = "telegram"
 INCOMING_DIR = "incoming"
 TYPING_ACTION = "typing"
 TYPING_REFRESH_SECONDS = 4.0
 STREAM_EDIT_INTERVAL = 1.0
+STREAM_EDIT_MAX_INTERVAL = 8.0
+TELEGRAM_MAX_CHARS = 4096
+WORKING_STATUS = "Working: {name}…"
 
 MODE_REPLIES: dict[ApprovalMode, str] = {
     "auto": "Auto mode on: sensitive tools now run directly, without asking.",
@@ -71,6 +84,18 @@ async def send_telegram_html(bot: Bot, chat_id: int, text: str) -> None:
             await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=HTML)
         except TelegramBadRequest:
             await bot.send_message(chat_id=chat_id, text=html_to_plain(chunk))
+
+
+def _clip_preview(text: str) -> str:
+    if len(text) <= TELEGRAM_MAX_CHARS:
+        return text
+    return "…" + text[-(TELEGRAM_MAX_CHARS - 1) :]
+
+
+def _preview(text: str, status: str | None) -> str:
+    if status:
+        text = f"{text}\n\n{status}" if text else status
+    return _clip_preview(text)
 
 
 class TelegramBot:
@@ -134,15 +159,29 @@ class TelegramBot:
             return
 
         chat_id = message.chat.id
-        identifier = str(chat_id)
         command = message.text.strip().lower().split(maxsplit=1)[0]
 
         if command == NEW_COMMAND:
-            thread_id = await self.sessions.reset(CHANNEL, identifier)
+            thread_id = await self.sessions.reset()
             await self.bot.send_message(chat_id=chat_id, text=f"[new session] {thread_id}")
             return
 
-        thread_id = await self.sessions.thread_id(CHANNEL, identifier)
+        thread_id = await self.sessions.thread_id()
+
+        if command == CONTEXT_COMMAND:
+            count, tokens = await self.service.context_stats(thread_id)
+            limit = self.service.config.agent.context_token_limit
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text=f"Context: {count} messages, ~{tokens} tokens (compaction at {limit}).",
+            )
+            return
+
+        if command == COMPACT_COMMAND:
+            compacted = await self.service.compact_session(thread_id)
+            text = "Context compacted." if compacted else "Not enough context to compact."
+            await self.bot.send_message(chat_id=chat_id, text=text)
+            return
 
         if command in (AUTO_COMMAND, MANUAL_COMMAND):
             mode: ApprovalMode = "auto" if command == AUTO_COMMAND else "manual"
@@ -174,7 +213,7 @@ class TelegramBot:
         note = f"[user sent a {kind}, saved in the workspace at {relative}]"
         prompt = f"{caption}\n{note}".strip() if caption else note
 
-        thread_id = await self.sessions.thread_id(CHANNEL, identifier)
+        thread_id = await self.sessions.thread_id()
         if is_image(destination):
             content: list[dict[str, Any]] = [
                 {"type": "text", "text": prompt},
@@ -214,8 +253,13 @@ class TelegramBot:
             return
 
         chat_id = callback.message.chat.id
-        thread_id = await self.sessions.thread_id(CHANNEL, str(chat_id))
+        await self._delete_message(chat_id, callback.message.message_id)
+        thread_id = await self.sessions.thread_id()
         await self._stream_reply(chat_id, self.service.resume(thread_id, approval_id, approved))
+
+    async def _delete_message(self, chat_id: int, message_id: int) -> None:
+        with contextlib.suppress(TelegramBadRequest):
+            await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
 
     async def _stream_reply(self, chat_id: int, stream: AsyncIterator[Event]) -> None:
         typing_done = asyncio.Event()
@@ -224,33 +268,46 @@ class TelegramBot:
 
         placeholder: Message | None = None
         text_parts: list[str] = []
+        status: str | None = None
         approval: ApprovalRequestEvent | None = None
-        streaming = True
         last_edit = 0.0
+        interval = STREAM_EDIT_INTERVAL
+
+        async def show(force: bool = False) -> None:
+            nonlocal placeholder, last_edit, interval
+            current = _preview("".join(text_parts), status)
+            if not current:
+                return
+            if placeholder is None:
+                typing_done.set()
+                placeholder = await self.bot.send_message(chat_id=chat_id, text=current)
+                last_edit = time.monotonic()
+                return
+            if not force and time.monotonic() - last_edit < interval:
+                return
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=placeholder.message_id,
+                    text=current,
+                )
+                interval = STREAM_EDIT_INTERVAL
+            except TelegramRetryAfter as exc:
+                interval = min(interval * 2, STREAM_EDIT_MAX_INTERVAL)
+                await asyncio.sleep(exc.retry_after)
+            except TelegramBadRequest:
+                pass
+            last_edit = time.monotonic()
 
         try:
             async for event in stream:
                 if isinstance(event, TokenEvent):
                     text_parts.append(event.delta)
-                    current = "".join(text_parts)
-                    if placeholder is None:
-                        if current:
-                            typing_done.set()
-                            placeholder = await self.bot.send_message(chat_id=chat_id, text=current)
-                            last_edit = time.monotonic()
-                    elif streaming and time.monotonic() - last_edit >= STREAM_EDIT_INTERVAL:
-                        try:
-                            await self.bot.edit_message_text(
-                                chat_id=chat_id,
-                                message_id=placeholder.message_id,
-                                text=current,
-                            )
-                            last_edit = time.monotonic()
-                        except TelegramBadRequest:
-                            streaming = False
-                        except TelegramRetryAfter as exc:
-                            streaming = False
-                            await asyncio.sleep(exc.retry_after)
+                    status = None
+                    await show()
+                elif isinstance(event, ToolCallEvent):
+                    status = WORKING_STATUS.format(name=event.name)
+                    await show(force=True)
                 elif isinstance(event, ErrorEvent):
                     text_parts.append(f"\n[error] {event.message}")
                 elif isinstance(event, FileEvent):
@@ -323,7 +380,9 @@ class TelegramBot:
                         parse_mode=parse_mode,
                     )
                     return
-                except TelegramBadRequest:
+                except TelegramBadRequest as exc:
+                    if "not modified" in str(exc):
+                        return
                     break
                 except TelegramRetryAfter as exc:
                     if attempt == 0:

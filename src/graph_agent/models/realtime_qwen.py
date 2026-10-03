@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import quote
@@ -9,19 +8,17 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 from graph_agent.config import RealtimeChannelConfig
-from graph_agent.models.realtime import WebSocketConnection, to_ws_scheme
+from graph_agent.models.realtime import (
+    ConnectionBackend,
+    WebSocketConnection,
+    auth_headers,
+    to_ws_scheme,
+)
 
 
 def build_qwen_url(config: RealtimeChannelConfig) -> str:
     base = to_ws_scheme(config.api_base.rstrip("/"))
     return f"{base}?model={quote(config.model)}" if config.model else base
-
-
-def qwen_headers(config: RealtimeChannelConfig) -> dict[str, str]:
-    key = ""
-    if config.api_key_env is not None:
-        key = os.environ.get(config.api_key_env, "")
-    return {"Authorization": f"Bearer {key or 'unused'}"}
 
 
 def _to_qwen_tool(tool: dict[str, Any]) -> dict[str, Any]:
@@ -39,8 +36,10 @@ def _to_qwen_tool(tool: dict[str, Any]) -> dict[str, Any]:
 
 def _to_qwen_session(session: dict[str, Any]) -> dict[str, Any]:
     out = dict(session)
-    out["input_audio_format"] = "pcm"
-    out["output_audio_format"] = "pcm"
+    if "input_audio_format" in out:
+        out["input_audio_format"] = "pcm"
+    if "output_audio_format" in out:
+        out["output_audio_format"] = "pcm"
     tools = out.get("tools")
     if isinstance(tools, list):
         out["tools"] = [_to_qwen_tool(tool) for tool in tools if isinstance(tool, dict)]
@@ -73,17 +72,13 @@ def from_qwen(message: dict[str, Any]) -> list[dict[str, Any]]:
     return [message]
 
 
-class QwenRealtimeBackend:
+class QwenRealtimeBackend(ConnectionBackend):
     """Backend for the Qwen-Omni-Realtime WebSocket API (Alibaba Model Studio)."""
-
-    def __init__(self, config: RealtimeChannelConfig) -> None:
-        self.config = config
-        self._conn: WebSocketConnection | None = None
 
     async def connect(self) -> None:
         ws: ClientConnection = await websockets.connect(
             build_qwen_url(self.config),
-            additional_headers=qwen_headers(self.config),
+            additional_headers=auth_headers(self.config),
         )
         self._conn = WebSocketConnection(ws)
 
@@ -94,13 +89,3 @@ class QwenRealtimeBackend:
         async for message in self._require().events():
             for event in from_qwen(message):
                 yield event
-
-    async def close(self) -> None:
-        if self._conn is not None:
-            await self._conn.close()
-            self._conn = None
-
-    def _require(self) -> WebSocketConnection:
-        if self._conn is None:
-            raise RuntimeError("realtime backend is not connected")
-        return self._conn

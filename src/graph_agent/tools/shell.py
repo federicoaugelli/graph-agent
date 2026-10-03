@@ -142,7 +142,7 @@ class ShellTool:
                 },
                 "required": ["command"],
             },
-            requires_approval=True,
+            requires_approval=self.config.approval_required,
         )
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> Any:

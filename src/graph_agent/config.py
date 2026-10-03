@@ -29,6 +29,8 @@ class AgentConfig(BaseModel):
     system_prompt: str | None = None
     persona_file: Path | None = None
     session_ttl_minutes: int | None = None
+    context_token_limit: int = 200_000
+    compaction_keep_messages: int = 20
 
 
 class MemoryConfig(BaseModel):
@@ -70,12 +72,31 @@ class RealtimeChannelConfig(BaseModel):
     model: str = ""
     api_base: str = "http://localhost:4000"
     api_key_env: str | None = None
+    instructions: str | None = None
+
+
+class VoiceChannelConfig(BaseModel):
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8101
+    sample_rate: int = 16000
+    output_sample_rate: int | None = None
+    greeting: str | None = None
+    advertise_host: str | None = None
+    trunk: str = "trunk"
+    caller_id: str | None = None
+    default_target: str | None = None
+    ami_host: str = "127.0.0.1"
+    ami_port: int = 5038
+    ami_username: str = "graphagent"
+    ami_secret_env: str = "ASTERISK_AMI_SECRET"
 
 
 class ChannelsConfig(BaseModel):
     http: HttpChannelConfig = Field(default_factory=HttpChannelConfig)
     telegram: TelegramChannelConfig = Field(default_factory=TelegramChannelConfig)
     realtime: RealtimeChannelConfig = Field(default_factory=RealtimeChannelConfig)
+    voice: VoiceChannelConfig = Field(default_factory=VoiceChannelConfig)
 
 
 class SchedulerConfig(BaseModel):

@@ -11,11 +11,14 @@ from fastapi import WebSocket, WebSocketDisconnect
 from graph_agent.config import RealtimeChannelConfig
 from graph_agent.core.service import AgentService
 from graph_agent.events import DoneEvent, ErrorEvent, TokenEvent
+from graph_agent.logging import get_logger
 from graph_agent.models.realtime import (
     RealtimeBackend,
     RealtimeConnection,
     build_realtime_backend,
 )
+
+logger = get_logger(__name__)
 
 DELEGATE_TOOL_NAME = "delegate_to_brain"
 
@@ -25,6 +28,13 @@ DELEGATE_INSTRUCTION = (
     "(personal facts, prior context, files, research, actions) call the "
     "`delegate_to_brain` tool with a self-contained prompt. Never claim you lack memory "
     "or capabilities: delegate instead."
+)
+
+FILLER_INSTRUCTION = (
+    "The main agent is now working on the request. Say one very short filler phrase "
+    "in the user's language to acknowledge it (for example 'un attimo', 'ci sto "
+    "pensando', 'sto lavorando'), then stop. Do not call any tool and do not answer "
+    "the request yet."
 )
 
 DELEGATE_TOOL: dict[str, Any] = {
@@ -46,6 +56,13 @@ DELEGATE_TOOL: dict[str, Any] = {
         "required": ["prompt"],
     },
 }
+
+
+def _filler_response() -> dict[str, Any]:
+    return {
+        "type": "response.create",
+        "response": {"instructions": FILLER_INSTRUCTION, "tool_choice": "none"},
+    }
 
 
 def _is_delegate_tool(tool: Any) -> bool:
@@ -97,7 +114,7 @@ class StarletteWebSocketConnection:
                 yield message
 
     async def close(self) -> None:
-        with contextlib.suppress(RuntimeError):
+        with contextlib.suppress(RuntimeError, WebSocketDisconnect):
             await self._ws.close()
 
 
@@ -161,16 +178,25 @@ class RealtimeBridge:
     async def _backend_to_client(
         self, client: RealtimeConnection, backend: RealtimeBackend, session_id: str
     ) -> None:
-        async for event in backend.events():
-            if event.get("type") == "session.created":
-                await backend.send(_delegate_session_update(self._session_instructions()))
-            elif self._is_delegate_call(event):
-                await self._handle_delegate(event, backend, session_id)
-                continue
-            await client.send(event)
+        pending: set[asyncio.Task[None]] = set()
+        finished = False
+        try:
+            async for event in backend.events():
+                if event.get("type") == "session.created":
+                    await backend.send(_delegate_session_update(self._session_instructions()))
+                elif self._is_delegate_call(event):
+                    await self._handle_delegate(event, backend, session_id, pending)
+                    continue
+                await client.send(event)
+            finished = True
+        finally:
+            if not finished:
+                for task in pending:
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def _session_instructions(self) -> str:
-        base = self.service.default_system_prompt
+        base = self.config.instructions or self.service.base_system_prompt
         if base:
             return f"{base}\n\n{DELEGATE_INSTRUCTION}"
         return DELEGATE_INSTRUCTION
@@ -182,7 +208,11 @@ class RealtimeBridge:
         )
 
     async def _handle_delegate(
-        self, event: dict[str, Any], backend: RealtimeBackend, session_id: str
+        self,
+        event: dict[str, Any],
+        backend: RealtimeBackend,
+        session_id: str,
+        pending: set[asyncio.Task[None]],
     ) -> None:
         call_id = str(event.get("call_id") or "")
         try:
@@ -190,13 +220,32 @@ class RealtimeBridge:
         except json.JSONDecodeError:
             args = {}
         prompt = str(args.get("prompt") or args.get("task") or "").strip()
-        if prompt:
-            output = await self._run_agent(session_id, prompt)
-        else:
-            output = (
+
+        if not prompt:
+            await self._send_delegate_output(
+                backend,
+                call_id,
                 "delegate_to_brain requires a non-empty 'prompt' argument "
-                "describing the task for the main agent."
+                "describing the task for the main agent.",
             )
+            return
+
+        await backend.send(_filler_response())
+        task = asyncio.create_task(self._finish_delegate(backend, call_id, session_id, prompt))
+        pending.add(task)
+        task.add_done_callback(pending.discard)
+
+    async def _finish_delegate(
+        self, backend: RealtimeBackend, call_id: str, session_id: str, prompt: str
+    ) -> None:
+        try:
+            output = await self._run_agent(session_id, prompt)
+            await self._send_delegate_output(backend, call_id, output)
+        except Exception:
+            logger.exception("delegate_to_brain failed", call_id=call_id)
+
+    @staticmethod
+    async def _send_delegate_output(backend: RealtimeBackend, call_id: str, output: str) -> None:
         await backend.send(
             {
                 "type": "conversation.item.create",

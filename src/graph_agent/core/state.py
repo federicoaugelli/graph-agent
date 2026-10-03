@@ -14,7 +14,6 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     session_id: str
     iterations: int
-    pending_approval: dict[str, Any] | None
     approval_mode: ApprovalMode
     system_prompt: str | None
 

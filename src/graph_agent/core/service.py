@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import aiosqlite
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.state import CompiledStateGraph
@@ -13,6 +14,7 @@ from langgraph.types import Command
 
 from graph_agent.bus import EventBus
 from graph_agent.config import AppConfig
+from graph_agent.core.compaction import compact
 from graph_agent.core.graph import build_agent_graph
 from graph_agent.core.state import AgentState, ApprovalMode
 from graph_agent.events import (
@@ -73,6 +75,15 @@ class AgentService:
     def default_system_prompt(self) -> str | None:
         """Composed system prompt (persona + skills + memory), if the service is set up."""
         return self._default_system_prompt
+
+    @property
+    def base_system_prompt(self) -> str | None:
+        """Persona/system prompt only, without skills or memory.
+
+        Used by lean clients (realtime) that should not carry the brain's full
+        knowledge and delegate heavy work instead.
+        """
+        return self._base_system_prompt()
 
     async def setup(self, backend: LLMBackend | None = None) -> None:
         """Initialize LLM backend, tool registry, checkpointer and compile the graph."""
@@ -174,14 +185,12 @@ class AgentService:
         approval_mode: ApprovalMode | None = None,
         system_prompt: str | None = None,
     ) -> AsyncIterator[Event]:
-        if self._graph is None:
-            await self.setup()
+        await self._require_graph()
 
         input_state: AgentState = {
             "messages": [HumanMessage(content=cast(Any, user_input))],
             "session_id": session_id,
             "iterations": 0,
-            "pending_approval": None,
         }
         if approval_mode is not None:
             input_state["approval_mode"] = approval_mode
@@ -207,19 +216,56 @@ class AgentService:
         config: RunnableConfig = {"configurable": {"thread_id": session_id}}
         await graph.aupdate_state(config, {"approval_mode": mode}, as_node="__start__")
 
+    async def context_stats(self, session_id: str) -> tuple[int, int]:
+        """Return (message_count, approximate_tokens) for a session's context."""
+        messages = await self._thread_messages(session_id)
+        return len(messages), count_tokens_approximately(messages)
+
+    async def compact_session(self, session_id: str) -> bool:
+        """Force an immediate compaction of a session. Returns False if nothing to do."""
+        graph = await self._require_graph()
+        backend = self._backend
+        if backend is None:
+            raise RuntimeError("service not initialized")
+
+        messages = await self._thread_messages(session_id)
+        replacement = await compact(
+            backend,
+            messages,
+            token_limit=1,
+            keep=self.config.agent.compaction_keep_messages,
+        )
+        if replacement is None:
+            return False
+
+        config: RunnableConfig = {"configurable": {"thread_id": session_id}}
+        await graph.aupdate_state(config, {"messages": replacement})
+        return True
+
+    async def _thread_messages(self, session_id: str) -> list[BaseMessage]:
+        graph = await self._require_graph()
+        config: RunnableConfig = {"configurable": {"thread_id": session_id}}
+        snapshot = await graph.aget_state(config)
+        values = snapshot.values if isinstance(snapshot.values, dict) else {}
+        messages = values.get("messages")
+        return list(messages) if isinstance(messages, list) else []
+
+    async def _require_graph(self) -> CompiledStateGraph:
+        if self._graph is None:
+            await self.setup()
+        if self._graph is None:
+            raise RuntimeError("service not initialized")
+        return self._graph
+
     async def delete_thread(self, thread_id: str) -> None:
         """Delete all checkpoints and pending writes for a thread (hard reset)."""
-        if self._db_conn is None:
-            return
-        await self._db_conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
-        await self._db_conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
-        await self._db_conn.commit()
+        if self._checkpointer is not None:
+            await self._checkpointer.adelete_thread(thread_id)
 
     async def resume(
         self, session_id: str, approval_id: str, approved: bool
     ) -> AsyncIterator[Event]:
-        if self._graph is None:
-            await self.setup()
+        await self._require_graph()
 
         command: Command[Any] = Command(
             resume={
