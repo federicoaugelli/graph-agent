@@ -216,6 +216,15 @@ class AgentService:
         config: RunnableConfig = {"configurable": {"thread_id": session_id}}
         await graph.aupdate_state(config, {"approval_mode": mode}, as_node="__start__")
 
+    async def get_approval_mode(self, session_id: str) -> ApprovalMode | None:
+        """Return the persisted approval mode of a session, or None if never set."""
+        graph = await self._require_graph()
+        config: RunnableConfig = {"configurable": {"thread_id": session_id}}
+        snapshot = await graph.aget_state(config)
+        values = snapshot.values if isinstance(snapshot.values, dict) else {}
+        mode = values.get("approval_mode")
+        return cast(ApprovalMode, mode) if mode else None
+
     async def context_stats(self, session_id: str) -> tuple[int, int]:
         """Return (message_count, approximate_tokens) for a session's context."""
         messages = await self._thread_messages(session_id)

@@ -16,11 +16,11 @@ models:
     max_tokens: 256
 
 agent:
-  max_iterations: 25
+  max_iterations: 50
   workspace: data/workspace
   checkpointer_db: data/checkpoints.sqlite
   # hard-reset a session after this many minutes of inactivity (null = never)
-  session_ttl_minutes: null
+  session_ttl_minutes: 60
   # automatic compaction: once the context exceeds this many tokens, older
   # messages are summarized (keeping the last ones verbatim). 0 disables it.
   context_token_limit: 200000
@@ -67,6 +67,9 @@ channels:
     token_env: TELEGRAM_BOT_TOKEN
     # fail-closed: empty list rejects every user
     allowed_user_ids: []
+    # default approval mode for new sessions ("manual" asks before sensitive
+    # tools, "auto" runs them directly). /auto and /manual override per session.
+    approval_mode: auto
   realtime:
     # served on the HTTP server (same host/port/token): ws://<host>:<port>/v1/realtime
     enabled: false

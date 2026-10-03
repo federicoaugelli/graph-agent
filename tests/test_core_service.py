@@ -1,10 +1,30 @@
 from __future__ import annotations
 
+from typing import Any
+
 from conftest import ScriptedLLMBackend
 from graph_agent.config import AppConfig
 from graph_agent.core.service import AgentService
 from graph_agent.events import DoneEvent, TokenEvent
-from graph_agent.models.llm import StreamChunk
+from graph_agent.models.llm import StreamChunk, ToolCallRequest
+from graph_agent.tools.base import ToolContext, ToolSpec
+
+
+class EchoTool:
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="echo",
+            description="Echo input.",
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        )
+
+    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> Any:
+        return args["text"]
 
 
 async def test_service_run_yields_done_event(app_config: AppConfig) -> None:
@@ -39,3 +59,31 @@ async def test_service_persists_history_with_checkpointer(app_config: AppConfig)
     assert "one" in contents
     assert "first" in contents
     assert "two" in contents
+
+
+async def test_service_reports_iteration_limit_in_done_event(app_config: AppConfig) -> None:
+    app_config.agent.max_iterations = 2
+    backend = ScriptedLLMBackend(
+        [
+            [
+                StreamChunk(
+                    tool_calls=[
+                        ToolCallRequest(id=f"call_{index}", name="echo", args={"text": "x"})
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ]
+            for index in range(10)
+        ]
+    )
+    service = AgentService(app_config)
+    await service.setup(backend)
+    service.registry.register(EchoTool())
+
+    events = [event async for event in service.run("limit", "loop")]
+
+    assert isinstance(events[-1], DoneEvent)
+    assert events[-1].final_text is not None
+    assert "maximum" in events[-1].final_text
+
+    await service.shutdown()

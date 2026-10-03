@@ -181,12 +181,22 @@ def build_agent_graph(
 
         return {"messages": outputs}
 
+    async def limit_node(state: AgentState) -> dict[str, object]:
+        writer = get_stream_writer()
+        message = (
+            f"I stopped after reaching the maximum of {resolved_max_iterations} iterations "
+            "without producing a final answer: the last requested tool calls were not executed. "
+            "Refine the request, or raise agent.max_iterations."
+        )
+        writer({"event": TokenEvent(delta=message)})
+        return {"messages": [AIMessage(content=message)]}
+
     def should_continue(state: AgentState) -> str:
         last_message = state["messages"][-1]
 
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
             if state["iterations"] >= resolved_max_iterations:
-                return "end"
+                return "limit"
             return "tools"
 
         return "end"
@@ -195,14 +205,16 @@ def build_agent_graph(
     builder.add_node("compact", compact_node)
     builder.add_node("agent", agent_node)
     builder.add_node("tools", tools_node)
+    builder.add_node("limit", limit_node)
     builder.add_edge(START, "compact")
     builder.add_edge("compact", "agent")
     builder.add_conditional_edges(
         "agent",
         should_continue,
-        {"tools": "tools", "end": END},
+        {"tools": "tools", "limit": "limit", "end": END},
     )
     builder.add_edge("tools", "compact")
+    builder.add_edge("limit", END)
 
     return builder.compile(checkpointer=checkpointer)
 

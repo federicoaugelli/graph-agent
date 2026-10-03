@@ -64,6 +64,7 @@ class TelegramChannelConfig(BaseModel):
     enabled: bool = False
     token_env: str = "TELEGRAM_BOT_TOKEN"
     allowed_user_ids: list[int] = Field(default_factory=list)
+    approval_mode: Literal["manual", "auto"] = "manual"
 
 
 class RealtimeChannelConfig(BaseModel):

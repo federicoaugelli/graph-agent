@@ -165,3 +165,30 @@ async def test_graph_respects_max_iterations(app_config: AppConfig) -> None:
     await collect_custom_events(graph, make_state("loop"))
 
     assert len(backend.calls) == 2
+
+
+async def test_graph_announces_when_iterations_are_exhausted(app_config: AppConfig) -> None:
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+
+    backend = ScriptedLLMBackend(
+        [
+            [
+                StreamChunk(
+                    tool_calls=[
+                        ToolCallRequest(id=f"call_{index}", name="echo", args={"text": "x"})
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ]
+            for index in range(10)
+        ]
+    )
+
+    graph = build_agent_graph(backend, registry, app_config, max_iterations=2)
+    events = await collect_custom_events(graph, make_state("loop"))
+
+    assert isinstance(events[-1], TokenEvent)
+    assert "2" in events[-1].delta
+    assert "maximum" in events[-1].delta
+    assert len(backend.calls) == 2

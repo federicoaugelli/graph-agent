@@ -163,6 +163,17 @@ async def test_set_approval_mode_persists_in_session(app_config: AppConfig) -> N
     await service.shutdown()
 
 
+async def test_get_approval_mode_none_until_set(app_config: AppConfig) -> None:
+    service, _, _ = await make_service(app_config)
+
+    assert await service.get_approval_mode("fresh") is None
+
+    await service.set_approval_mode("fresh", "auto")
+    assert await service.get_approval_mode("fresh") == "auto"
+
+    await service.shutdown()
+
+
 async def test_session_mode_survives_later_turns(app_config: AppConfig) -> None:
     tool = ConfirmTool()
     backend = ScriptedLLMBackend(

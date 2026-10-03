@@ -133,6 +133,11 @@ class TelegramBot:
         """Whether the user may talk to the agent (empty allowlist = deny all)."""
         return user_id in self.config.allowed_user_ids
 
+    async def _resolve_approval_mode(self, thread_id: str) -> ApprovalMode:
+        """Persisted per-session mode if set, otherwise the channel default."""
+        persisted = await self.service.get_approval_mode(thread_id)
+        return persisted or self.config.approval_mode
+
     async def set_commands(self) -> None:
         """Publish the slash-command menu so clients can list it under ``/``."""
         await self.bot.set_my_commands(COMMANDS)
@@ -189,7 +194,10 @@ class TelegramBot:
             await self.bot.send_message(chat_id=chat_id, text=MODE_REPLIES[mode])
             return
 
-        await self._stream_reply(chat_id, self.service.run(thread_id, message.text))
+        mode = await self._resolve_approval_mode(thread_id)
+        await self._stream_reply(
+            chat_id, self.service.run(thread_id, message.text, approval_mode=mode)
+        )
 
     async def handle_file(self, message: Message) -> None:
         """File handler: download document/photo into the workspace, then run the agent."""
@@ -214,14 +222,19 @@ class TelegramBot:
         prompt = f"{caption}\n{note}".strip() if caption else note
 
         thread_id = await self.sessions.thread_id()
+        mode = await self._resolve_approval_mode(thread_id)
         if is_image(destination):
             content: list[dict[str, Any]] = [
                 {"type": "text", "text": prompt},
                 image_content_part(destination),
             ]
-            await self._stream_reply(chat_id, self.service.run(thread_id, content))
+            await self._stream_reply(
+                chat_id, self.service.run(thread_id, content, approval_mode=mode)
+            )
         else:
-            await self._stream_reply(chat_id, self.service.run(thread_id, prompt))
+            await self._stream_reply(
+                chat_id, self.service.run(thread_id, prompt, approval_mode=mode)
+            )
 
     async def handle_approval_callback(self, callback: CallbackQuery) -> None:
         """Callback handler: approve/deny -> service.resume(), then stream result."""
@@ -330,6 +343,8 @@ class TelegramBot:
                 await self._edit_html(chat_id, placeholder.message_id, final_text)
             else:
                 await send_telegram_html(self.bot, chat_id, final_text)
+        elif placeholder is not None:
+            await self._delete_message(chat_id, placeholder.message_id)
 
         if approval is not None:
             await self._send_approval_request(chat_id, approval)

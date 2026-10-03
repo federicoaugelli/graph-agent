@@ -384,6 +384,52 @@ async def test_tool_call_shows_a_working_status(
     await service.shutdown()
 
 
+async def test_working_status_is_removed_when_pausing_for_approval(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    tool = ConfirmTool()
+    backend = ScriptedLLMBackend(
+        [
+            [
+                StreamChunk(
+                    tool_calls=[ToolCallRequest(id="call_1", name="confirm", args={"text": "one"})],
+                    finish_reason="tool_calls",
+                )
+            ],
+            [
+                StreamChunk(
+                    tool_calls=[ToolCallRequest(id="call_2", name="confirm", args={"text": "two"})],
+                    finish_reason="tool_calls",
+                )
+            ],
+            text_chunks("end"),
+        ]
+    )
+    service = AgentService(app_config)
+    await service.setup(backend)
+    service.registry.register(tool)
+    bot = TelegramBot(
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
+    )
+    recorder = RecordingBot()
+    bot.bot = recorder  # type: ignore[assignment]
+
+    await bot.handle_message(make_message("do it"))
+    await bot.handle_approval_callback(make_callback(f"{APPROVE_PREFIX}call_1"))
+
+    working_index = next(
+        index
+        for index, call in enumerate(recorder.calls)
+        if call["method"] == "send" and "Working: confirm" in call["text"]
+    )
+    after_working = recorder.calls[working_index + 1 :]
+    assert any(call["method"] == "delete" for call in after_working)
+    assert after_working[-1]["reply_markup"] is not None
+
+    await service.shutdown()
+
+
 async def test_not_modified_edit_does_not_duplicate(
     app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -544,7 +590,9 @@ async def test_telegram_uses_the_shared_session(
     await service.shutdown()
 
 
-async def make_approval_bot(app_config: AppConfig, monkeypatch: pytest.MonkeyPatch) -> Any:
+async def make_approval_bot(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch, approval_mode: str = "manual"
+) -> Any:
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
     tool = ConfirmTool()
     backend = ScriptedLLMBackend(approval_script())
@@ -553,7 +601,7 @@ async def make_approval_bot(app_config: AppConfig, monkeypatch: pytest.MonkeyPat
     service.registry.register(tool)
     bot = TelegramBot(
         service,
-        TelegramChannelConfig(allowed_user_ids=[USER_ID]),
+        TelegramChannelConfig(allowed_user_ids=[USER_ID], approval_mode=approval_mode),
         SessionManager(service),
     )
     recorder = RecordingBot()
@@ -692,6 +740,35 @@ async def test_approval_mode_is_shared(
 
     assert tool.executed == [{"text": "boom"}]
     assert all(call["reply_markup"] is None for call in recorder.calls)
+
+    await service.shutdown()
+
+
+async def test_config_default_auto_skips_approval(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot, recorder, tool, service = await make_approval_bot(app_config, monkeypatch, "auto")
+
+    await bot.handle_message(make_message("do it"))
+
+    assert tool.executed == [{"text": "boom"}]
+    assert all(call["reply_markup"] is None for call in recorder.calls)
+    assert recorder.calls[-1]["text"] == "end"
+
+    await service.shutdown()
+
+
+async def test_persisted_mode_overrides_config_default(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bot, recorder, tool, service = await make_approval_bot(app_config, monkeypatch, "auto")
+    thread_id = await bot.sessions.thread_id()
+    await service.set_approval_mode(thread_id, "manual")
+
+    await bot.handle_message(make_message("do it"))
+
+    assert tool.executed == []
+    assert any(call["reply_markup"] is not None for call in recorder.calls)
 
     await service.shutdown()
 
