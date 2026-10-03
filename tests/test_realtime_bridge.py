@@ -19,10 +19,14 @@ from graph_agent.tools.base import ToolContext, ToolSpec
 from graph_agent.transports.http import create_app
 from graph_agent.transports.realtime.bridge import (
     DELEGATE_INSTRUCTION,
+    DELEGATE_REQUEST_SUFFIX,
     DELEGATE_TOOL_NAME,
     RealtimeBridge,
+    _delegate_call,
     _delegate_session_update,
+    _SessionState,
 )
+from graph_agent.transports.realtime.text import normalize_for_speech
 
 
 class FakeConnection:
@@ -177,7 +181,8 @@ async def test_backend_to_client_declares_tool_and_delegates(app_config: AppConf
     assert tool_output["item"]["output"] == "risposta dell'agente"
 
     assert llm.calls, "the agent backend was never called"
-    assert llm.calls[0][-1].content == "ciao agente"
+    assert str(llm.calls[0][-1].content).startswith("ciao agente")
+    assert DELEGATE_REQUEST_SUFFIX in str(llm.calls[0][-1].content)
     assert call not in client.sent
     await service.shutdown()
 
@@ -350,3 +355,90 @@ def test_realtime_ws_accepts_query_token(
 
     assert len(bridge.sessions) == 1
     assert bridge.sessions[0] == "shared:1"
+
+
+async def test_delegate_receives_accumulated_user_transcript(app_config: AppConfig) -> None:
+    llm = fake_text_response("ok")
+    service = AgentService(app_config)
+    await service.setup(llm)
+    bridge = RealtimeBridge(service, realtime_config())
+    backend = FakeBackend(
+        [
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "com'era il meteo ieri?",
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "name": DELEGATE_TOOL_NAME,
+                "call_id": "c1",
+                "arguments": json.dumps({"prompt": "riassumi il meteo di ieri"}),
+            },
+        ]
+    )
+    client = FakeConnection(block=True)
+
+    await bridge.run(client, backend, "realtime:test")
+
+    messages = llm.calls[0]
+    contents = [str(message.content) for message in messages]
+    assert any("com'era il meteo ieri?" in content for content in contents)
+    assert str(messages[-1].content).startswith("riassumi il meteo di ieri")
+    await service.shutdown()
+
+
+def test_session_state_drains_transcript_between_delegations() -> None:
+    state = _SessionState()
+    state.record_user_event(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "transcript": "prima",
+        }
+    )
+    assert [str(message.content) for message in state.take_transcript()] == ["prima"]
+
+    state.record_user_event(
+        {
+            "type": "conversation.item.created",
+            "item": {"role": "user", "content": [{"type": "input_text", "text": "seconda"}]},
+        }
+    )
+    assert [str(message.content) for message in state.take_transcript()] == ["seconda"]
+    assert state.take_transcript() == []
+
+
+def test_delegate_call_from_output_item() -> None:
+    call = _delegate_call(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "name": DELEGATE_TOOL_NAME,
+                "call_id": "c9",
+                "arguments": json.dumps({"prompt": "x"}),
+            },
+        }
+    )
+    assert call is not None
+    assert call.call_id == "c9"
+
+    empty = _delegate_call(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "name": DELEGATE_TOOL_NAME,
+                "call_id": "c9",
+                "arguments": "",
+            },
+        }
+    )
+    assert empty is None
+
+
+def test_normalize_for_speech_strips_markdown() -> None:
+    assert normalize_for_speech("**Ciao** _mondo_ # Titolo") == "Ciao mondo Titolo"
+    assert normalize_for_speech("Vedi [qui](http://x.com) e `code`") == "Vedi qui e code"
+    assert normalize_for_speech("- uno\n- due") == "uno. due"
+    assert normalize_for_speech("Sto bene \U0001f600") == "Sto bene"
+    assert normalize_for_speech("") == ""

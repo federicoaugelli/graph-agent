@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import aiosqlite
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -180,7 +180,7 @@ class AgentService:
     async def run(
         self,
         session_id: str,
-        user_input: str | list[dict[str, Any]],
+        user_input: str | list[dict[str, Any]] | list[BaseMessage],
         *,
         approval_mode: ApprovalMode | None = None,
         system_prompt: str | None = None,
@@ -188,7 +188,7 @@ class AgentService:
         await self._require_graph()
 
         input_state: AgentState = {
-            "messages": [HumanMessage(content=cast(Any, user_input))],
+            "messages": _to_messages(user_input),
             "session_id": session_id,
             "iterations": 0,
         }
@@ -335,6 +335,16 @@ class AgentService:
         done_event = DoneEvent(session_id=session_id, final_text=final_text)
         await self.bus.publish(f"session:{session_id}", done_event)
         yield done_event
+
+
+def _to_messages(
+    user_input: str | list[dict[str, Any]] | list[BaseMessage],
+) -> list[AnyMessage]:
+    if isinstance(user_input, str):
+        return [HumanMessage(content=user_input)]
+    if user_input and all(isinstance(item, BaseMessage) for item in user_input):
+        return cast("list[AnyMessage]", user_input)
+    return [HumanMessage(content=cast(Any, user_input))]
 
 
 def _approval_event(item: Any) -> ApprovalRequestEvent:

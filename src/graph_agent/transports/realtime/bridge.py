@@ -4,9 +4,11 @@ import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
+from langchain_core.messages import BaseMessage, HumanMessage
 
 from graph_agent.config import RealtimeChannelConfig
 from graph_agent.core.service import AgentService
@@ -17,17 +19,26 @@ from graph_agent.models.realtime import (
     RealtimeConnection,
     build_realtime_backend,
 )
+from graph_agent.transports.realtime.text import normalize_for_speech
 
 logger = get_logger(__name__)
 
 DELEGATE_TOOL_NAME = "delegate_to_brain"
 
 DELEGATE_INSTRUCTION = (
-    "You are the realtime voice interface of an autonomous agent that owns persistent "
-    "memory, files, tools and multi-step reasoning. For anything that needs them "
-    "(personal facts, prior context, files, research, actions) call the "
-    "`delegate_to_brain` tool with a self-contained prompt. Never claim you lack memory "
-    "or capabilities: delegate instead."
+    "You are the realtime voice front-end of an autonomous agent called the 'brain'. "
+    "The brain owns persistent memory, files, tools and multi-step reasoning; you do "
+    "not. RULE: whenever the user asks about personal facts, previous context, files, "
+    "the web, or asks you to do, remember, find, send or check anything, you MUST call "
+    "the `delegate_to_brain` tool with a self-contained prompt instead of answering. "
+    "The tool output is the brain's reply: relay it to the user in natural speech. "
+    "NEVER say that you cannot remember, access or do something: delegate instead. "
+    "Chat directly only for pure small talk that needs neither memory nor tools."
+)
+
+DELEGATE_REQUEST_SUFFIX = (
+    "\n\n[Reply in plain spoken language for a voice assistant: short conversational "
+    "prose. No markdown, no lists, no code blocks, no emojis, no asterisks.]"
 )
 
 FILLER_INSTRUCTION = (
@@ -99,6 +110,91 @@ def _delegate_session_update(instructions: str, voice: str | None = None) -> dic
     return {"type": "session.update", "session": session}
 
 
+def _log_session_update(update: dict[str, Any]) -> None:
+    session = update.get("session")
+    if not isinstance(session, dict):
+        return
+    tools = [
+        tool.get("name")
+        for tool in session.get("tools", [])
+        if isinstance(tool, dict) and tool.get("name")
+    ]
+    logger.info(
+        "realtime session configured",
+        tools=tools,
+        instructions_chars=len(session.get("instructions") or ""),
+    )
+
+
+@dataclass(slots=True)
+class _DelegateCall:
+    call_id: str
+    arguments: str
+
+
+def _delegate_call(event: dict[str, Any]) -> _DelegateCall | None:
+    """Extract a delegate invocation across OpenAI/Qwen function-call dialects."""
+    etype = event.get("type")
+    if etype == "response.function_call_arguments.done":
+        if event.get("name") == DELEGATE_TOOL_NAME:
+            return _DelegateCall(
+                str(event.get("call_id") or ""),
+                str(event.get("arguments") or "{}"),
+            )
+    elif etype == "response.output_item.done":
+        item = event.get("item")
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "function_call"
+            and item.get("name") == DELEGATE_TOOL_NAME
+        ):
+            arguments = str(item.get("arguments") or "")
+            if arguments:
+                return _DelegateCall(str(item.get("call_id") or ""), arguments)
+    return None
+
+
+def _text_from_item(item: dict[str, Any]) -> str:
+    content = item.get("content")
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text") or part.get("input_text") or part.get("transcript")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return " ".join(parts)
+
+
+@dataclass
+class _SessionState:
+    """Per-connection state: the realtime transcript fed to the brain on delegate."""
+
+    transcript: list[BaseMessage] = field(default_factory=list)
+    handled_calls: set[str] = field(default_factory=set)
+
+    def record_user_event(self, event: dict[str, Any]) -> None:
+        etype = event.get("type")
+        if etype == "conversation.item.input_audio_transcription.completed":
+            self._record(str(event.get("transcript") or ""))
+        elif etype == "conversation.item.created":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("role") == "user":
+                self._record(_text_from_item(item))
+
+    def _record(self, text: str) -> None:
+        text = text.strip()
+        if text:
+            self.transcript.append(HumanMessage(content=text))
+
+    def take_transcript(self) -> list[BaseMessage]:
+        messages = self.transcript
+        self.transcript = []
+        return messages
+
+
 class StarletteWebSocketConnection:
     """JSON-framed adapter over a FastAPI/Starlette server-side WebSocket."""
 
@@ -151,9 +247,10 @@ class RealtimeBridge:
     async def run(
         self, client: RealtimeConnection, backend: RealtimeBackend, session_id: str
     ) -> None:
+        state = _SessionState()
         tasks = [
             asyncio.create_task(self._client_to_backend(client, backend)),
-            asyncio.create_task(self._backend_to_client(client, backend, session_id)),
+            asyncio.create_task(self._backend_to_client(client, backend, session_id, state)),
         ]
         try:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -181,19 +278,34 @@ class RealtimeBridge:
             await backend.send(event)
 
     async def _backend_to_client(
-        self, client: RealtimeConnection, backend: RealtimeBackend, session_id: str
+        self,
+        client: RealtimeConnection,
+        backend: RealtimeBackend,
+        session_id: str,
+        state: _SessionState | None = None,
     ) -> None:
+        state = state or _SessionState()
         pending: set[asyncio.Task[None]] = set()
         finished = False
         try:
             async for event in backend.events():
-                if event.get("type") == "session.created":
-                    await backend.send(
-                        _delegate_session_update(self._session_instructions(), self.config.voice)
+                etype = event.get("type")
+                if etype == "session.created":
+                    update = _delegate_session_update(
+                        self._session_instructions(), self.config.voice
                     )
-                elif self._is_delegate_call(event):
-                    await self._handle_delegate(event, backend, session_id, pending)
-                    continue
+                    _log_session_update(update)
+                    await backend.send(update)
+                elif etype == "error":
+                    logger.warning("realtime backend error", error=event.get("error"))
+                else:
+                    call = _delegate_call(event)
+                    if call is not None and call.call_id not in state.handled_calls:
+                        state.handled_calls.add(call.call_id)
+                        await self._handle_delegate(call, backend, session_id, state, pending)
+                        continue
+
+                state.record_user_event(event)
                 await client.send(event)
             finished = True
         finally:
@@ -208,22 +320,16 @@ class RealtimeBridge:
             return f"{base}\n\n{DELEGATE_INSTRUCTION}"
         return DELEGATE_INSTRUCTION
 
-    def _is_delegate_call(self, event: dict[str, Any]) -> bool:
-        return (
-            event.get("type") == "response.function_call_arguments.done"
-            and event.get("name") == DELEGATE_TOOL_NAME
-        )
-
     async def _handle_delegate(
         self,
-        event: dict[str, Any],
+        call: _DelegateCall,
         backend: RealtimeBackend,
         session_id: str,
+        state: _SessionState,
         pending: set[asyncio.Task[None]],
     ) -> None:
-        call_id = str(event.get("call_id") or "")
         try:
-            args = json.loads(event.get("arguments") or "{}")
+            args = json.loads(call.arguments or "{}")
         except json.JSONDecodeError:
             args = {}
         prompt = str(args.get("prompt") or args.get("task") or "").strip()
@@ -231,22 +337,37 @@ class RealtimeBridge:
         if not prompt:
             await self._send_delegate_output(
                 backend,
-                call_id,
+                call.call_id,
                 "delegate_to_brain requires a non-empty 'prompt' argument "
                 "describing the task for the main agent.",
             )
             return
 
+        transcript = state.take_transcript()
+        logger.info(
+            "delegating to brain",
+            call_id=call.call_id,
+            transcript_messages=len(transcript),
+            prompt_chars=len(prompt),
+        )
+
         await backend.send(_filler_response())
-        task = asyncio.create_task(self._finish_delegate(backend, call_id, session_id, prompt))
+        task = asyncio.create_task(
+            self._finish_delegate(backend, call.call_id, session_id, prompt, transcript)
+        )
         pending.add(task)
         task.add_done_callback(pending.discard)
 
     async def _finish_delegate(
-        self, backend: RealtimeBackend, call_id: str, session_id: str, prompt: str
+        self,
+        backend: RealtimeBackend,
+        call_id: str,
+        session_id: str,
+        prompt: str,
+        transcript: list[BaseMessage],
     ) -> None:
         try:
-            output = await self._run_agent(session_id, prompt)
+            output = await self._run_agent(session_id, prompt, transcript)
             await self._send_delegate_output(backend, call_id, output)
         except Exception:
             logger.exception("delegate_to_brain failed", call_id=call_id)
@@ -265,10 +386,16 @@ class RealtimeBridge:
         )
         await backend.send({"type": "response.create"})
 
-    async def _run_agent(self, session_id: str, prompt: str) -> str:
+    async def _run_agent(
+        self,
+        session_id: str,
+        prompt: str,
+        transcript: list[BaseMessage] | None = None,
+    ) -> str:
+        messages = [*(transcript or []), HumanMessage(content=f"{prompt}{DELEGATE_REQUEST_SUFFIX}")]
         parts: list[str] = []
         final_text: str | None = None
-        async for event in self.service.run(session_id, prompt, approval_mode="auto"):
+        async for event in self.service.run(session_id, messages, approval_mode="auto"):
             if isinstance(event, TokenEvent):
                 parts.append(event.delta)
             elif isinstance(event, ErrorEvent):
@@ -278,4 +405,4 @@ class RealtimeBridge:
         text = "".join(parts)
         if not text and final_text:
             text = final_text
-        return text or "(no response)"
+        return normalize_for_speech(text) or "(no response)"
