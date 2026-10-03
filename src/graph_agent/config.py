@@ -73,6 +73,7 @@ class RealtimeChannelConfig(BaseModel):
     api_base: str = "http://localhost:4000"
     api_key_env: str | None = None
     instructions: str | None = None
+    voice: str | None = None
 
 
 class VoiceChannelConfig(BaseModel):

@@ -121,6 +121,7 @@ class AudioSocketConnection:
         self._send_buffer = bytearray()
         self._outgoing: asyncio.Queue[bytes] = asyncio.Queue()
         self._pump: asyncio.Task[None] | None = None
+        self._interrupted = False
 
     def start(self) -> None:
         """Start the real-time audio writer (20 ms frames, paced)."""
@@ -159,8 +160,17 @@ class AudioSocketConnection:
         event_type = str(event.get("type"))
         self._event_types[event_type] = self._event_types.get(event_type, 0) + 1
 
+        if event_type == "input_audio_buffer.speech_started":
+            self._interrupted = True
+            self._clear_pending_audio()
+            return
+        if event_type == "response.created":
+            self._interrupted = False
+
         delta = _audio_delta(event)
         if delta is not None:
+            if self._interrupted:
+                return
             audio = resample_pcm16(
                 base64.b64decode(delta), self._output_rate, TELEPHONY_RATE
             )
@@ -168,6 +178,12 @@ class AudioSocketConnection:
             self._queue_audio(audio)
         elif event_type == "error":
             logger.warning("realtime error", error=event.get("error"))
+
+    def _clear_pending_audio(self) -> None:
+        """Drop buffered playback so barge-in stops the model immediately."""
+        self._send_buffer.clear()
+        while not self._outgoing.empty():
+            self._outgoing.get_nowait()
 
     def _queue_audio(self, audio: bytes) -> None:
         self._send_buffer.extend(audio)

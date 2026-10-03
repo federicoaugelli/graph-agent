@@ -138,3 +138,22 @@ async def test_connection_ignores_non_audio_events() -> None:
     await connection.send({"type": "response.audio.delta", "delta": ""})
 
     assert writer.data == b""
+
+
+async def test_connection_drops_output_when_user_interrupts() -> None:
+    connection, _, _ = _connection(b"", VoiceChannelConfig(sample_rate=16000))
+    delta = base64.b64encode(array("h", list(range(320))).tobytes()).decode()
+
+    await connection.send({"type": "response.audio.delta", "delta": delta})
+    assert not connection._outgoing.empty()
+
+    await connection.send({"type": "input_audio_buffer.speech_started"})
+    assert connection._send_buffer == b""
+    assert connection._outgoing.empty()
+
+    await connection.send({"type": "response.audio.delta", "delta": delta})
+    assert connection._outgoing.empty()
+
+    await connection.send({"type": "response.created"})
+    await connection.send({"type": "response.audio.delta", "delta": delta})
+    assert not connection._outgoing.empty()

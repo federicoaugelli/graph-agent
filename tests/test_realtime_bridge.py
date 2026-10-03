@@ -21,6 +21,7 @@ from graph_agent.transports.realtime.bridge import (
     DELEGATE_INSTRUCTION,
     DELEGATE_TOOL_NAME,
     RealtimeBridge,
+    _delegate_session_update,
 )
 
 
@@ -74,6 +75,28 @@ async def test_client_to_backend_injects_delegate_tool(app_config: AppConfig) ->
     assert instructions.startswith("hi")
     assert DELEGATE_INSTRUCTION in instructions
     await service.shutdown()
+
+
+async def test_client_to_backend_injects_configured_voice(app_config: AppConfig) -> None:
+    service = AgentService(app_config)
+    await service.setup(fake_text_response("ok"))
+    config = RealtimeChannelConfig(
+        enabled=True, backend="openai", model="fake-realtime", voice="longanlingxin"
+    )
+    bridge = RealtimeBridge(service, config)
+    backend = FakeConnection()
+    client = FakeConnection([{"type": "session.update", "session": {"instructions": "hi"}}])
+
+    await bridge._client_to_backend(client, backend)
+
+    assert backend.sent[0]["session"]["voice"] == "longanlingxin"
+    await service.shutdown()
+
+
+def test_delegate_session_update_carries_voice() -> None:
+    update = _delegate_session_update("base", "longanlingxin")
+    assert update["session"]["voice"] == "longanlingxin"
+    assert _delegate_session_update("base")["session"].get("voice") is None
 
 
 async def test_client_to_backend_passthrough(app_config: AppConfig) -> None:

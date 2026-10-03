@@ -88,11 +88,15 @@ def _ensure_delegate_instructions(session: dict[str, Any]) -> None:
         session["instructions"] = f"{existing}\n\n{DELEGATE_INSTRUCTION}"
 
 
-def _delegate_session_update(instructions: str) -> dict[str, Any]:
-    return {
-        "type": "session.update",
-        "session": {"tools": [DELEGATE_TOOL], "instructions": instructions},
-    }
+def _ensure_voice(session: dict[str, Any], voice: str | None) -> None:
+    if voice:
+        session["voice"] = voice
+
+
+def _delegate_session_update(instructions: str, voice: str | None = None) -> dict[str, Any]:
+    session: dict[str, Any] = {"tools": [DELEGATE_TOOL], "instructions": instructions}
+    _ensure_voice(session, voice)
+    return {"type": "session.update", "session": session}
 
 
 class StarletteWebSocketConnection:
@@ -173,6 +177,7 @@ class RealtimeBridge:
                 if isinstance(session, dict):
                     _ensure_delegate_tool(session)
                     _ensure_delegate_instructions(session)
+                    _ensure_voice(session, self.config.voice)
             await backend.send(event)
 
     async def _backend_to_client(
@@ -183,7 +188,9 @@ class RealtimeBridge:
         try:
             async for event in backend.events():
                 if event.get("type") == "session.created":
-                    await backend.send(_delegate_session_update(self._session_instructions()))
+                    await backend.send(
+                        _delegate_session_update(self._session_instructions(), self.config.voice)
+                    )
                 elif self._is_delegate_call(event):
                     await self._handle_delegate(event, backend, session_id, pending)
                     continue

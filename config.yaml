@@ -80,6 +80,9 @@ channels:
     # lean switchboard prompt: by default only the agent persona/system_prompt is
     # sent (no skills/memory/tool details). Override with a short custom prompt here.
     # instructions: "You are the voice front desk of my assistant."
+    # output voice id, provider-specific (e.g. Qwen-Audio "longanlingxin"). Empty
+    # keeps the model default.
+    # voice: ""
   voice:
     # Asterisk AudioSocket server (telephony bridge). The dialplan calls
     # AudioSocket(uuid, <host>:<port>); the phone leg is bridged to the
