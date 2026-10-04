@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -28,7 +29,23 @@ class RealtimeConnection(Protocol):
 class RealtimeBackend(RealtimeConnection, Protocol):
     """Upstream realtime provider. Speaks OpenAI Realtime events at its boundary."""
 
+    @property
+    def capabilities(self) -> RealtimeCapabilities: ...
+
     async def connect(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeCapabilities:
+    """Optional realtime features a backend may not implement.
+
+    The bridge degrades gracefully when a backend lacks a feature, so the same
+    agent-agnostic orchestration works across OpenAI, Qwen and local models.
+    """
+
+    supports_cancel: bool = True
+    supports_progress: bool = True
+    supports_semantic_vad: bool = True
 
 
 class WebSocketConnection:
@@ -89,6 +106,10 @@ class ConnectionBackend:
     def __init__(self, config: RealtimeChannelConfig) -> None:
         self.config = config
         self._conn: WebSocketConnection | None = None
+
+    @property
+    def capabilities(self) -> RealtimeCapabilities:
+        return RealtimeCapabilities()
 
     async def close(self) -> None:
         if self._conn is not None:

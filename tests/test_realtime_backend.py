@@ -8,7 +8,7 @@ from graph_agent.models.realtime_qwen import (
     from_qwen,
     to_qwen,
 )
-from graph_agent.transports.realtime.bridge import DELEGATE_TOOL
+from graph_agent.transports.realtime.delegate import DELEGATE_TOOL
 
 
 def test_realtime_config_defaults() -> None:
@@ -42,6 +42,20 @@ def test_build_qwen_url_uses_full_api_base() -> None:
 def test_factory_selects_backend() -> None:
     backend = build_realtime_backend(RealtimeChannelConfig(backend="qwen"))
     assert isinstance(backend, QwenRealtimeBackend)
+
+
+def test_qwen_capabilities_are_conservative() -> None:
+    backend = build_realtime_backend(RealtimeChannelConfig(backend="qwen"))
+    assert backend.capabilities.supports_cancel
+    assert backend.capabilities.supports_progress
+    assert not backend.capabilities.supports_semantic_vad
+
+
+def test_openai_capabilities_are_full() -> None:
+    backend = build_realtime_backend(RealtimeChannelConfig())
+    assert backend.capabilities.supports_cancel
+    assert backend.capabilities.supports_progress
+    assert backend.capabilities.supports_semantic_vad
 
 
 def test_to_qwen_adapts_session_update() -> None:

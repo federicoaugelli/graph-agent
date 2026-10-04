@@ -10,6 +10,7 @@ from websockets.asyncio.client import ClientConnection
 from graph_agent.config import RealtimeChannelConfig
 from graph_agent.models.realtime import (
     ConnectionBackend,
+    RealtimeCapabilities,
     WebSocketConnection,
     auth_headers,
     to_ws_scheme,
@@ -74,6 +75,10 @@ def from_qwen(message: dict[str, Any]) -> list[dict[str, Any]]:
 
 class QwenRealtimeBackend(ConnectionBackend):
     """Backend for the Qwen-Omni-Realtime WebSocket API (Alibaba Model Studio)."""
+
+    @property
+    def capabilities(self) -> RealtimeCapabilities:
+        return RealtimeCapabilities(supports_semantic_vad=False)
 
     async def connect(self) -> None:
         ws: ClientConnection = await websockets.connect(

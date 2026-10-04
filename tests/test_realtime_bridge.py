@@ -13,18 +13,16 @@ from conftest import ScriptedLLMBackend, fake_text_response
 from graph_agent.config import AppConfig, RealtimeChannelConfig
 from graph_agent.core.service import AgentService
 from graph_agent.core.sessions import SessionManager
-from graph_agent.events import DoneEvent
 from graph_agent.models.llm import StreamChunk, ToolCallRequest
 from graph_agent.tools.base import ToolContext, ToolSpec
 from graph_agent.transports.http import create_app
-from graph_agent.transports.realtime.bridge import (
+from graph_agent.transports.realtime.bridge import RealtimeBridge
+from graph_agent.transports.realtime.delegate import (
     DELEGATE_INSTRUCTION,
     DELEGATE_REQUEST_SUFFIX,
     DELEGATE_TOOL_NAME,
-    RealtimeBridge,
-    _delegate_call,
+    DelegationSupervisor,
     _delegate_session_update,
-    _SessionState,
 )
 from graph_agent.transports.realtime.text import normalize_for_speech
 
@@ -64,6 +62,10 @@ def realtime_config() -> RealtimeChannelConfig:
     return RealtimeChannelConfig(enabled=True, backend="openai", model="fake-realtime")
 
 
+def _supervisor(service: AgentService, backend: FakeConnection) -> DelegationSupervisor:
+    return DelegationSupervisor(service, cast(Any, backend), "realtime:test")
+
+
 async def test_client_to_backend_injects_delegate_tool(app_config: AppConfig) -> None:
     service = AgentService(app_config)
     await service.setup(fake_text_response("ok"))
@@ -71,7 +73,7 @@ async def test_client_to_backend_injects_delegate_tool(app_config: AppConfig) ->
     backend = FakeConnection()
     client = FakeConnection([{"type": "session.update", "session": {"instructions": "hi"}}])
 
-    await bridge._client_to_backend(client, backend)
+    await bridge._client_to_backend(client, cast(Any, backend), _supervisor(service, backend))
 
     tool_names = [tool["name"] for tool in backend.sent[0]["session"]["tools"]]
     assert DELEGATE_TOOL_NAME in tool_names
@@ -91,7 +93,7 @@ async def test_client_to_backend_injects_configured_voice(app_config: AppConfig)
     backend = FakeConnection()
     client = FakeConnection([{"type": "session.update", "session": {"instructions": "hi"}}])
 
-    await bridge._client_to_backend(client, backend)
+    await bridge._client_to_backend(client, cast(Any, backend), _supervisor(service, backend))
 
     assert backend.sent[0]["session"]["voice"] == "longanlingxin"
     await service.shutdown()
@@ -111,7 +113,7 @@ async def test_client_to_backend_passthrough(app_config: AppConfig) -> None:
     event = {"type": "input_audio_buffer.append", "audio": "AAAA"}
     client = FakeConnection([event])
 
-    await bridge._client_to_backend(client, backend)
+    await bridge._client_to_backend(client, cast(Any, backend), _supervisor(service, backend))
 
     assert backend.sent == [event]
     await service.shutdown()
@@ -163,7 +165,7 @@ async def test_backend_to_client_declares_tool_and_delegates(app_config: AppConf
     backend = FakeBackend([{"type": "session.created", "session": {}}, call])
     client = FakeConnection(block=True)
 
-    await bridge.run(client, backend, "realtime:test")
+    await bridge.run(client, cast(Any, backend), "realtime:test")
 
     sent_types = [event["type"] for event in backend.sent]
     assert "session.update" in sent_types
@@ -232,7 +234,7 @@ async def test_delegate_uses_auto_approval(app_config: AppConfig) -> None:
     )
     client = FakeConnection(block=True)
 
-    await bridge.run(client, backend, "realtime:test")
+    await bridge.run(client, cast(Any, backend), "realtime:test")
 
     output = next(event for event in backend.sent if event["type"] == "conversation.item.create")[
         "item"
@@ -259,7 +261,7 @@ async def test_delegate_handles_empty_prompt(app_config: AppConfig) -> None:
     )
     client = FakeConnection(block=True)
 
-    await bridge.run(client, backend, "realtime:test")
+    await bridge.run(client, cast(Any, backend), "realtime:test")
 
     output = next(event for event in backend.sent if event["type"] == "conversation.item.create")[
         "item"
@@ -269,24 +271,6 @@ async def test_delegate_handles_empty_prompt(app_config: AppConfig) -> None:
     await service.shutdown()
 
 
-class _DoneOnlyService:
-    def run(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        async def _gen() -> AsyncIterator[Any]:
-            yield DoneEvent(session_id="realtime:test", final_text="solo final text")
-
-        return _gen()
-
-    @property
-    def default_system_prompt(self) -> str | None:
-        return None
-
-
-async def test_run_agent_falls_back_to_done_event() -> None:
-    bridge = RealtimeBridge(cast(Any, _DoneOnlyService()), realtime_config())
-
-    assert await bridge._run_agent("realtime:test", "ciao") == "solo final text"
-
-
 async def test_run_returns_when_backend_stream_ends(app_config: AppConfig) -> None:
     service = AgentService(app_config)
     await service.setup(fake_text_response("ok"))
@@ -294,7 +278,7 @@ async def test_run_returns_when_backend_stream_ends(app_config: AppConfig) -> No
     backend = FakeBackend([])
     client = FakeConnection(block=True)
 
-    await bridge.run(client, backend, "realtime:test")
+    await bridge.run(client, cast(Any, backend), "realtime:test")
 
     assert client.sent == []
     await service.shutdown()
@@ -307,7 +291,7 @@ async def test_run_returns_when_client_stream_ends(app_config: AppConfig) -> Non
     backend = FakeBackend(block=True)
     client = FakeConnection([])
 
-    await asyncio.wait_for(bridge.run(client, backend, "realtime:test"), timeout=1)
+    await asyncio.wait_for(bridge.run(client, cast(Any, backend), "realtime:test"), timeout=1)
 
     assert backend.sent == []
     await service.shutdown()
@@ -378,62 +362,13 @@ async def test_delegate_receives_accumulated_user_transcript(app_config: AppConf
     )
     client = FakeConnection(block=True)
 
-    await bridge.run(client, backend, "realtime:test")
+    await bridge.run(client, cast(Any, backend), "realtime:test")
 
     messages = llm.calls[0]
     contents = [str(message.content) for message in messages]
     assert any("com'era il meteo ieri?" in content for content in contents)
     assert str(messages[-1].content).startswith("riassumi il meteo di ieri")
     await service.shutdown()
-
-
-def test_session_state_drains_transcript_between_delegations() -> None:
-    state = _SessionState()
-    state.record_user_event(
-        {
-            "type": "conversation.item.input_audio_transcription.completed",
-            "transcript": "prima",
-        }
-    )
-    assert [str(message.content) for message in state.take_transcript()] == ["prima"]
-
-    state.record_user_event(
-        {
-            "type": "conversation.item.created",
-            "item": {"role": "user", "content": [{"type": "input_text", "text": "seconda"}]},
-        }
-    )
-    assert [str(message.content) for message in state.take_transcript()] == ["seconda"]
-    assert state.take_transcript() == []
-
-
-def test_delegate_call_from_output_item() -> None:
-    call = _delegate_call(
-        {
-            "type": "response.output_item.done",
-            "item": {
-                "type": "function_call",
-                "name": DELEGATE_TOOL_NAME,
-                "call_id": "c9",
-                "arguments": json.dumps({"prompt": "x"}),
-            },
-        }
-    )
-    assert call is not None
-    assert call.call_id == "c9"
-
-    empty = _delegate_call(
-        {
-            "type": "response.output_item.done",
-            "item": {
-                "type": "function_call",
-                "name": DELEGATE_TOOL_NAME,
-                "call_id": "c9",
-                "arguments": "",
-            },
-        }
-    )
-    assert empty is None
 
 
 def test_normalize_for_speech_strips_markdown() -> None:
