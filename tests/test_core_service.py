@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+
 from conftest import ScriptedLLMBackend
 from graph_agent.config import AppConfig
 from graph_agent.core.service import AgentService
@@ -85,5 +87,45 @@ async def test_service_reports_iteration_limit_in_done_event(app_config: AppConf
     assert isinstance(events[-1], DoneEvent)
     assert events[-1].final_text is not None
     assert "maximum" in events[-1].final_text
+
+    await service.shutdown()
+
+
+def _pending_tool_call_ids(messages: list[BaseMessage]) -> list[str]:
+    pending: list[str] = []
+    for message in messages:
+        if isinstance(message, AIMessage) and message.tool_calls:
+            pending = [str(call["id"]) for call in message.tool_calls]
+        elif isinstance(message, ToolMessage):
+            if str(message.tool_call_id) in pending:
+                pending.remove(str(message.tool_call_id))
+        elif pending:
+            return pending
+    return pending
+
+
+async def test_follow_up_after_iteration_limit_has_no_dangling_tool_calls(
+    app_config: AppConfig,
+) -> None:
+    app_config.agent.max_iterations = 1
+    backend = ScriptedLLMBackend(
+        [
+            [
+                StreamChunk(
+                    tool_calls=[ToolCallRequest(id="call_1", name="echo", args={"text": "x"})],
+                    finish_reason="tool_calls",
+                )
+            ],
+            [StreamChunk(delta_text="done", finish_reason="stop")],
+        ]
+    )
+    service = AgentService(app_config)
+    await service.setup(backend)
+    service.registry.register(EchoTool())
+
+    _ = [event async for event in service.run("limit", "loop")]
+    _ = [event async for event in service.run("limit", "again")]
+
+    assert _pending_tool_call_ids(backend.calls[-1]) == []
 
     await service.shutdown()

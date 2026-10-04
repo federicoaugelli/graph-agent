@@ -13,6 +13,7 @@ from langgraph.types import interrupt
 
 from graph_agent.config import AppConfig
 from graph_agent.core.compaction import compact
+from graph_agent.core.messages import INTERRUPTED_TOOL_RESULT, repair_tool_call_pairs
 from graph_agent.core.state import AgentState, resolve_approval_mode
 from graph_agent.events import ErrorEvent, FileEvent, TokenEvent, ToolCallEvent, ToolResultEvent
 from graph_agent.models.llm import LLMBackend
@@ -49,7 +50,7 @@ def build_agent_graph(
         text_parts: list[str] = []
         tool_calls: list[Any] = []
 
-        messages: list[BaseMessage] = list(state["messages"])
+        messages = repair_tool_call_pairs(list(state["messages"]))
 
         system_prompt = state.get("system_prompt")
         if system_prompt:
@@ -189,7 +190,18 @@ def build_agent_graph(
             "Refine the request, or raise agent.max_iterations."
         )
         writer({"event": TokenEvent(delta=message)})
-        return {"messages": [AIMessage(content=message)]}
+        outputs: list[BaseMessage] = []
+        last_message = state["messages"][-1]
+        if isinstance(last_message, AIMessage) and last_message.tool_calls:
+            for tool_call in last_message.tool_calls:
+                outputs.append(
+                    ToolMessage(
+                        content=INTERRUPTED_TOOL_RESULT,
+                        tool_call_id=str(tool_call["id"]),
+                    )
+                )
+        outputs.append(AIMessage(content=message))
+        return {"messages": outputs}
 
     def should_continue(state: AgentState) -> str:
         last_message = state["messages"][-1]

@@ -4,6 +4,7 @@ from langchain_core.messages import BaseMessage, RemoveMessage, SystemMessage, T
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
+from graph_agent.core.messages import repair_tool_call_pairs
 from graph_agent.models.llm import LLMBackend
 
 SUMMARY_INSTRUCTIONS = (
@@ -29,6 +30,7 @@ async def compact(
     ``ToolMessage`` so tool calls stay paired with their results. Returns None when
     there is nothing to compact.
     """
+    messages = repair_tool_call_pairs(messages)
     if token_limit <= 0 or count_tokens_approximately(messages) <= token_limit:
         return None
 

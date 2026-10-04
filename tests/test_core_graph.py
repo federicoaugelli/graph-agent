@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from conftest import ScriptedLLMBackend
 from graph_agent.config import AppConfig
@@ -165,6 +165,41 @@ async def test_graph_respects_max_iterations(app_config: AppConfig) -> None:
     await collect_custom_events(graph, make_state("loop"))
 
     assert len(backend.calls) == 2
+
+
+def _pending_ids(messages: list[BaseMessage]) -> list[str]:
+    pending: list[str] = []
+    for message in messages:
+        if isinstance(message, AIMessage) and message.tool_calls:
+            pending = [str(call["id"]) for call in message.tool_calls]
+        elif isinstance(message, ToolMessage):
+            if str(message.tool_call_id) in pending:
+                pending.remove(str(message.tool_call_id))
+        elif pending:
+            return pending
+    return pending
+
+
+async def test_agent_repairs_dangling_tool_calls_before_calling_model(
+    app_config: AppConfig,
+) -> None:
+    backend = ScriptedLLMBackend([[StreamChunk(delta_text="ok", finish_reason="stop")]])
+    graph = build_agent_graph(backend, ToolRegistry(), app_config)
+    state: AgentState = {
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "call_1", "name": "echo", "args": {}, "type": "tool_call"}],
+            ),
+            HumanMessage(content="next"),
+        ],
+        "session_id": "test",
+        "iterations": 0,
+    }
+
+    await collect_custom_events(graph, state)
+
+    assert _pending_ids(backend.calls[0]) == []
 
 
 async def test_graph_announces_when_iterations_are_exhausted(app_config: AppConfig) -> None:
