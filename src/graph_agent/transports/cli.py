@@ -8,6 +8,7 @@ from graph_agent.core.service import AgentService
 from graph_agent.core.sessions import SessionManager
 from graph_agent.events import (
     ApprovalRequestEvent,
+    CancelledEvent,
     DoneEvent,
     ErrorEvent,
     Event,
@@ -94,5 +95,7 @@ def _render(event: object) -> None:
         print(f"\n[approval {event.approval_id}] {event.name} {event.args}")
     elif isinstance(event, ErrorEvent):
         print(f"\n[error] {event.message}", file=sys.stderr)
+    elif isinstance(event, CancelledEvent):
+        print("\n[interrupted by a newer message]")
     elif isinstance(event, DoneEvent):
         print()

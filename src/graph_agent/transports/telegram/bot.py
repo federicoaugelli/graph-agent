@@ -26,6 +26,7 @@ from graph_agent.core.sessions import SessionManager
 from graph_agent.core.state import ApprovalMode
 from graph_agent.events import (
     ApprovalRequestEvent,
+    CancelledEvent,
     ErrorEvent,
     Event,
     FileEvent,
@@ -283,6 +284,7 @@ class TelegramBot:
         text_parts: list[str] = []
         status: str | None = None
         approval: ApprovalRequestEvent | None = None
+        cancelled = False
         last_edit = 0.0
         interval = STREAM_EDIT_INTERVAL
 
@@ -314,6 +316,9 @@ class TelegramBot:
 
         try:
             async for event in stream:
+                if isinstance(event, CancelledEvent):
+                    cancelled = True
+                    break
                 if isinstance(event, TokenEvent):
                     text_parts.append(event.delta)
                     status = None
@@ -336,6 +341,11 @@ class TelegramBot:
             typing_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await typing_task
+
+        if cancelled:
+            if placeholder is not None:
+                await self._delete_message(chat_id, placeholder.message_id)
+            return
 
         final_text = "".join(text_parts).strip()
         if final_text:

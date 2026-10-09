@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +9,7 @@ import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.methods import EditMessageText, SendMessage
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, Message
+from langchain_core.messages import BaseMessage
 
 from conftest import ScriptedLLMBackend
 from graph_agent.config import AppConfig, TelegramChannelConfig
@@ -920,5 +923,71 @@ async def test_disallowed_user_file_is_ignored(
 
     assert recorder.calls == []
     assert backend.calls == []
+
+    await service.shutdown()
+
+
+class GatedTelegramBackend:
+    """Blocks the first reply so a second chat message can barge in."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[BaseMessage]] = []
+        self.entered = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    async def astream(
+        self, messages: list[BaseMessage], tools: list[dict[str, Any]] | None = None
+    ) -> AsyncIterator[StreamChunk]:
+        self.calls.append(messages)
+        if len(self.calls) == 1:
+            yield StreamChunk(delta_text="partial", finish_reason=None)
+            self.entered.set()
+            await self.gate.wait()
+            yield StreamChunk(delta_text=" ignored", finish_reason="stop")
+        else:
+            yield StreamChunk(delta_text="final answer", finish_reason="stop")
+
+    async def acomplete(
+        self, messages: list[BaseMessage], tools: list[dict[str, Any]] | None = None
+    ) -> StreamChunk:
+        self.calls.append(messages)
+        return StreamChunk(delta_text="final answer", finish_reason="stop")
+
+
+async def _wait_for(predicate: Any, timeout: float = 1.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.01)
+
+
+async def test_new_message_discards_the_previous_reply(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    backend = GatedTelegramBackend()
+    service = AgentService(app_config)
+    await service.setup(backend)
+    bot = TelegramBot(
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
+    )
+    recorder = RecordingBot()
+    bot.bot = recorder  # type: ignore[assignment]
+
+    first = asyncio.create_task(bot.handle_message(make_message("first")))
+    await asyncio.wait_for(backend.entered.wait(), timeout=1.0)
+    await _wait_for(
+        lambda: any(
+            call["method"] == "send" and "partial" in call["text"] for call in recorder.calls
+        )
+    )
+
+    await bot.handle_message(make_message("second"))
+    await asyncio.wait_for(first, timeout=1.0)
+
+    assert any(call["method"] == "delete" for call in recorder.calls), "old reply must be removed"
+    assert any(call["text"] == "final answer" for call in recorder.calls)
 
     await service.shutdown()

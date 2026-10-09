@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,6 +23,7 @@ from graph_agent.core.metrics import RunMetrics, reset_run_metrics, start_run_me
 from graph_agent.core.state import AgentState, ApprovalMode
 from graph_agent.events import (
     ApprovalRequestEvent,
+    CancelledEvent,
     DoneEvent,
     ErrorEvent,
     Event,
@@ -74,6 +77,7 @@ class AgentService:
         self._skills: SkillStore | None = None
         self._mcp: MCPClientManager | None = None
         self._default_system_prompt: str | None = None
+        self._active: dict[str, asyncio.Task[None]] = {}
 
     @property
     def registry(self) -> ToolRegistry:
@@ -174,6 +178,10 @@ class AgentService:
         return persona_file.read_text()
 
     async def shutdown(self) -> None:
+        for task in list(self._active.values()):
+            await _cancel_task(task)
+        self._active.clear()
+
         if self._db_conn is not None:
             await self._db_conn.close()
             self._db_conn = None
@@ -215,7 +223,7 @@ class AgentService:
         if prompt is not None:
             input_state["system_prompt"] = prompt
 
-        async for event in self._stream_graph(input_state, session_id):
+        async for event in self._guard_stream(input_state, session_id):
             yield event
 
     async def set_approval_mode(self, session_id: str, mode: ApprovalMode) -> None:
@@ -296,7 +304,7 @@ class AgentService:
             }
         )
 
-        async for event in self._stream_graph(command, session_id):
+        async for event in self._guard_stream(command, session_id):
             yield event
 
     async def pending_approval(self, session_id: str) -> ApprovalRequestEvent | None:
@@ -319,6 +327,53 @@ class AgentService:
             return _approval_event(item)
         return None
 
+    async def _guard_stream(self, graph_input: Any, session_id: str) -> AsyncIterator[Event]:
+        """Relay one run's events while making other runs in the session barge in.
+
+        The newest message wins: starting a run cancels the one still in flight
+        for the same session instead of letting two graph executions race on the
+        same thread. The graph is driven by a dedicated task and its events are
+        relayed through a queue, so an in-flight run can be cancelled from the
+        outside. A cancelled run ends with a ``CancelledEvent`` so transports can
+        discard its partial output.
+        """
+        await self._cancel_active(session_id)
+
+        queue: asyncio.Queue[Event | None] = asyncio.Queue()
+
+        async def produce() -> None:
+            try:
+                async for event in self._stream_graph(graph_input, session_id):
+                    queue.put_nowait(event)
+            finally:
+                queue.put_nowait(None)
+
+        task = asyncio.create_task(produce())
+        self._active[session_id] = task
+
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    if task.cancelled():
+                        yield CancelledEvent(session_id=session_id)
+                    elif (error := task.exception()) is not None:
+                        raise error
+                    break
+                yield item
+        finally:
+            await _cancel_task(task)
+            if self._active.get(session_id) is task:
+                del self._active[session_id]
+
+    async def _cancel_active(self, session_id: str) -> None:
+        task = self._active.get(session_id)
+        if task is None:
+            return
+        await _cancel_task(task)
+        if self._active.get(session_id) is task:
+            del self._active[session_id]
+
     async def _stream_graph(self, graph_input: Any, session_id: str) -> AsyncIterator[Event]:
         graph = self._graph
         if graph is None:
@@ -328,9 +383,13 @@ class AgentService:
         done_seen = False
         started = time.perf_counter()
         metrics, metrics_token = start_run_metrics()
+        stream = cast(
+            "AsyncGenerator[Any, None]",
+            graph.astream(graph_input, config=config, stream_mode="custom"),
+        )
 
         try:
-            async for chunk in graph.astream(graph_input, config=config, stream_mode="custom"):
+            async for chunk in stream:
                 if not isinstance(chunk, dict):
                     continue
 
@@ -370,7 +429,17 @@ class AgentService:
             await self.bus.publish(f"session:{session_id}", done_event)
             yield done_event
         finally:
+            with contextlib.suppress(Exception):
+                await stream.aclose()
             reset_run_metrics(metrics_token)
+
+
+async def _cancel_task(task: asyncio.Task[None]) -> None:
+    if task.done():
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
 
 
 def _to_messages(

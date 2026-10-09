@@ -75,6 +75,12 @@ class DoneEvent:
     event_id: str = field(default_factory=_new_id)
 
 
+@dataclass(slots=True)
+class CancelledEvent:
+    session_id: str
+    event_id: str = field(default_factory=_new_id)
+
+
 Event = (
     TokenEvent
     | ToolCallEvent
@@ -84,4 +90,5 @@ Event = (
     | ErrorEvent
     | MetricsEvent
     | DoneEvent
+    | CancelledEvent
 )
