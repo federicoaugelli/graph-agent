@@ -74,14 +74,25 @@ class WebSearchTool:
         if not results:
             raise RuntimeError(self._no_results_message(body))
 
-        return [
-            {
-                "title": r.get("title", ""),
-                "url": r.get("url", ""),
-                "snippet": r.get("content") or "",
-            }
-            for r in results[:max_results]
-        ]
+        normalized: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        for result in results:
+            url = result.get("url", "")
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            snippet = result.get("content") or ""
+            normalized.append(
+                {
+                    "title": result.get("title", ""),
+                    "url": url,
+                    "snippet": snippet[: self.config.max_snippet_chars],
+                }
+            )
+            if len(normalized) >= max_results:
+                break
+
+        return normalized
 
     async def _get_with_retry(
         self,

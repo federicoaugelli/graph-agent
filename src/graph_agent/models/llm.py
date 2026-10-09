@@ -24,6 +24,8 @@ class StreamChunk:
     delta_text: str = ""
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 class LLMBackend(Protocol):
@@ -48,6 +50,7 @@ def _default_model(config: ModelConfig) -> ChatOpenAI:
         api_key=SecretStr(api_key),
         temperature=config.temperature,
         max_completion_tokens=config.max_tokens,
+        stream_usage=True,
     )
 
 
@@ -95,13 +98,18 @@ class OpenAICompatBackend:
 
         finish_reason = assembled.response_metadata.get("finish_reason")
         tool_calls = assembled.tool_calls
-        if finish_reason is not None or tool_calls:
+        usage = assembled.usage_metadata
+        prompt_tokens = int(usage["input_tokens"]) if usage else None
+        completion_tokens = int(usage["output_tokens"]) if usage else None
+        if finish_reason is not None or tool_calls or usage:
             yield StreamChunk(
                 finish_reason=finish_reason,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
                 tool_calls=[
                     ToolCallRequest(
                         id=str(tool_call["id"] or ""),
-                        name=tool_call["name"],
+                        name=str(tool_call["name"]),
                         args=dict(tool_call["args"]),
                     )
                     for tool_call in tool_calls

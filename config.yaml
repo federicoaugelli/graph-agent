@@ -25,6 +25,12 @@ agent:
   # messages are summarized (keeping the last ones verbatim). 0 disables it.
   context_token_limit: 200000
   compaction_keep_messages: 20
+  # emit a MetricsEvent (counts + llm/tool durations + tokens) before DoneEvent
+  latency_metrics: true
+  # cap on a single tool output embedded in the context (chars; 0 disables)
+  max_tool_output_chars: 20000
+  # short-circuit identical tool calls repeated more than N times in a run (0 disables)
+  repeat_tool_call_limit: 3
 
 memory:
   enabled: true
@@ -139,6 +145,17 @@ tools:
     api_base: http://localhost:8888
     # SearXNG aggregates several engines; a single query routinely takes ~5s.
     timeout_seconds: 30
+    # cap on each result snippet embedded in the context (chars)
+    max_snippet_chars: 1000
+  web_fetch:
+    # read a page found via web_search (httpx + BeautifulSoup), no shell needed
+    # real config in config.local.yaml
+    enabled: false
+    timeout_seconds: 15
+    max_bytes: 2000000
+    max_chars: 8000
+    # false = refuse private/loopback hosts (prevents SSRF to internal services)
+    allow_private_hosts: false
 
 logging:
   level: INFO

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
@@ -16,6 +17,7 @@ from graph_agent.bus import EventBus
 from graph_agent.config import AppConfig
 from graph_agent.core.compaction import compact
 from graph_agent.core.graph import build_agent_graph
+from graph_agent.core.metrics import RunMetrics, reset_run_metrics, start_run_metrics
 from graph_agent.core.state import AgentState, ApprovalMode
 from graph_agent.events import (
     ApprovalRequestEvent,
@@ -23,6 +25,7 @@ from graph_agent.events import (
     ErrorEvent,
     Event,
     FileEvent,
+    MetricsEvent,
     TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -31,7 +34,13 @@ from graph_agent.mcp.client import MCPClientManager
 from graph_agent.memory import MemoryStore
 from graph_agent.models.llm import LLMBackend, OpenAICompatBackend
 from graph_agent.skills import SkillStore
-from graph_agent.tools import FilesystemTool, SendFileTool, ToolRegistry, WebSearchTool
+from graph_agent.tools import (
+    FilesystemTool,
+    SendFileTool,
+    ToolRegistry,
+    WebFetchTool,
+    WebSearchTool,
+)
 from graph_agent.tools.shell import ShellTool
 
 _EVENT_TYPES = (
@@ -39,6 +48,7 @@ _EVENT_TYPES = (
     DoneEvent,
     ErrorEvent,
     FileEvent,
+    MetricsEvent,
     TokenEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -117,6 +127,9 @@ class AgentService:
 
         if self.config.tools.web_search.enabled:
             registry.register(WebSearchTool(self.config.tools.web_search))
+
+        if self.config.tools.web_fetch.enabled:
+            registry.register(WebFetchTool(self.config.tools.web_fetch))
 
         if self.config.tools.shell.enabled:
             registry.register(ShellTool(self.config.sandbox))
@@ -313,37 +326,51 @@ class AgentService:
 
         config: RunnableConfig = {"configurable": {"thread_id": session_id}}
         done_seen = False
+        started = time.perf_counter()
+        metrics, metrics_token = start_run_metrics()
 
-        async for chunk in graph.astream(graph_input, config=config, stream_mode="custom"):
-            if not isinstance(chunk, dict):
-                continue
+        try:
+            async for chunk in graph.astream(graph_input, config=config, stream_mode="custom"):
+                if not isinstance(chunk, dict):
+                    continue
 
-            event = chunk.get("event")
-            if not isinstance(event, _EVENT_TYPES):
-                continue
+                event = chunk.get("event")
+                if not isinstance(event, _EVENT_TYPES):
+                    continue
 
-            if isinstance(event, DoneEvent):
-                done_seen = True
+                if isinstance(event, DoneEvent):
+                    done_seen = True
 
-            await self.bus.publish(f"session:{session_id}", event)
-            yield event
-
-        if done_seen:
-            return
-
-        snapshot = await graph.aget_state(config)
-
-        if snapshot.interrupts:
-            for item in snapshot.interrupts:
-                event = _approval_event(item)
                 await self.bus.publish(f"session:{session_id}", event)
                 yield event
-            return
 
-        final_text = _last_assistant_text(snapshot.values)
-        done_event = DoneEvent(session_id=session_id, final_text=final_text)
-        await self.bus.publish(f"session:{session_id}", done_event)
-        yield done_event
+            if done_seen:
+                return
+
+            snapshot = await graph.aget_state(config)
+
+            if snapshot.interrupts:
+                for item in snapshot.interrupts:
+                    event = _approval_event(item)
+                    await self.bus.publish(f"session:{session_id}", event)
+                    yield event
+                return
+
+            if self.config.agent.latency_metrics:
+                metrics_event = _metrics_event(
+                    metrics,
+                    snapshot.values,
+                    total_ms=int((time.perf_counter() - started) * 1000),
+                )
+                await self.bus.publish(f"session:{session_id}", metrics_event)
+                yield metrics_event
+
+            final_text = _last_assistant_text(snapshot.values)
+            done_event = DoneEvent(session_id=session_id, final_text=final_text)
+            await self.bus.publish(f"session:{session_id}", done_event)
+            yield done_event
+        finally:
+            reset_run_metrics(metrics_token)
 
 
 def _to_messages(
@@ -364,6 +391,24 @@ def _approval_event(item: Any) -> ApprovalRequestEvent:
         tool_call_id=str(payload.get("tool_call_id") or ""),
         name=str(payload.get("name") or ""),
         args=dict(args) if isinstance(args, dict) else {},
+    )
+
+
+def _metrics_event(metrics: RunMetrics, values: Any, *, total_ms: int) -> MetricsEvent:
+    iterations = 0
+    if isinstance(values, dict):
+        value = values.get("iterations")
+        if isinstance(value, int):
+            iterations = value
+    return MetricsEvent(
+        iterations=iterations or metrics.llm_calls,
+        llm_calls=metrics.llm_calls,
+        tool_calls=metrics.tool_calls,
+        llm_duration_ms=int(metrics.llm_ms),
+        tool_duration_ms=int(metrics.tool_ms),
+        total_duration_ms=total_ms,
+        prompt_tokens=metrics.prompt_tokens or None,
+        completion_tokens=metrics.completion_tokens or None,
     )
 
 

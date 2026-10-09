@@ -56,6 +56,19 @@ class ErrorEvent:
 
 
 @dataclass(slots=True)
+class MetricsEvent:
+    iterations: int
+    llm_calls: int
+    tool_calls: int
+    llm_duration_ms: int
+    tool_duration_ms: int
+    total_duration_ms: int
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    event_id: str = field(default_factory=_new_id)
+
+
+@dataclass(slots=True)
 class DoneEvent:
     session_id: str
     final_text: str | None = None
@@ -69,5 +82,6 @@ Event = (
     | ApprovalRequestEvent
     | FileEvent
     | ErrorEvent
+    | MetricsEvent
     | DoneEvent
 )

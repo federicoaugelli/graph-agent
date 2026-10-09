@@ -31,6 +31,9 @@ class AgentConfig(BaseModel):
     session_ttl_minutes: int | None = None
     context_token_limit: int = 200_000
     compaction_keep_messages: int = 20
+    latency_metrics: bool = False
+    max_tool_output_chars: int = 20_000
+    repeat_tool_call_limit: int = 3
 
 
 class MemoryConfig(BaseModel):
@@ -132,12 +135,22 @@ class WebSearchToolConfig(BaseModel):
     api_base: str | None = None
     api_key_env: str | None = None
     timeout_seconds: float = 30.0
+    max_snippet_chars: int = 1000
+
+
+class WebFetchToolConfig(BaseModel):
+    enabled: bool = False
+    timeout_seconds: float = 15.0
+    max_bytes: int = 2_000_000
+    max_chars: int = 8000
+    allow_private_hosts: bool = False
 
 
 class ToolsConfig(BaseModel):
     filesystem: FilesystemToolConfig = Field(default_factory=FilesystemToolConfig)
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     web_search: WebSearchToolConfig = Field(default_factory=WebSearchToolConfig)
+    web_fetch: WebFetchToolConfig = Field(default_factory=WebFetchToolConfig)
 
 
 class LoggingConfig(BaseModel):

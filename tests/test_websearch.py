@@ -16,13 +16,19 @@ def build_tool(
     captured: dict[str, Any],
     api_base: str | None = "http://searx.test",
     provider: str = "searxng",
+    max_snippet_chars: int = 1000,
 ) -> WebSearchTool:
     def routed(request: httpx.Request) -> httpx.Response:
         captured["request"] = request
         return handler(request)
 
     transport = httpx.MockTransport(routed)
-    config = WebSearchToolConfig(enabled=True, provider=provider, api_base=api_base)
+    config = WebSearchToolConfig(
+        enabled=True,
+        provider=provider,
+        api_base=api_base,
+        max_snippet_chars=max_snippet_chars,
+    )
     return WebSearchTool(config, transport=transport)
 
 
@@ -261,3 +267,46 @@ async def test_http_error_propagates(minimal_config: Any) -> None:
 
 def test_timeout_defaults_to_thirty_seconds() -> None:
     assert WebSearchToolConfig().timeout_seconds == 30.0
+
+
+async def test_dedups_repeated_urls(minimal_config: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"title": "a", "url": "https://example.com/a", "content": "x"},
+                    {"title": "a again", "url": "https://example.com/a", "content": "x"},
+                    {"title": "b", "url": "https://example.com/b", "content": "y"},
+                ]
+            },
+        )
+
+    tool = build_tool(handler, captured)
+    ctx = await make_ctx(minimal_config)
+
+    results = await tool.execute({"query": "x"}, ctx)
+
+    assert [item["url"] for item in results] == [
+        "https://example.com/a",
+        "https://example.com/b",
+    ]
+
+
+async def test_truncates_snippets_to_config_limit(minimal_config: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"results": [{"title": "t", "url": "u", "content": "s" * 5000}]},
+        )
+
+    tool = build_tool(handler, captured, max_snippet_chars=50)
+    ctx = await make_ctx(minimal_config)
+
+    results = await tool.execute({"query": "x"}, ctx)
+
+    assert len(results[0]["snippet"]) == 50
