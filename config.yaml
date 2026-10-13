@@ -147,6 +147,12 @@ tools:
     timeout_seconds: 30
     # cap on each result snippet embedded in the context (chars)
     max_snippet_chars: 1000
+    # batch: extra query variants fetched in the same tool call (merged + deduped)
+    max_queries_per_call: 4
+    # cap on web_search calls per turn; stops the "search -> model -> search" spiral
+    max_calls_per_run: 6
+    # drop a query that repeats an already-seen one (0 = disable; 0..1)
+    dedupe_similarity: 0.8
   web_fetch:
     # read a page found via web_search (httpx + BeautifulSoup), no shell needed
     # real config in config.local.yaml

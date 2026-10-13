@@ -104,6 +104,7 @@ class RecordingBot:
             "destination": kwargs.get("destination"),
             "action": kwargs.get("action") or (args[1] if len(args) > 1 else None),
             "commands": kwargs.get("commands") or (args[0] if args else None),
+            "disable_notification": kwargs.get("disable_notification"),
         }
         self.calls.append(entry)
         return entry
@@ -284,10 +285,9 @@ async def test_message_streams_final_answer(bot_env: Any) -> None:
 
     await bot.handle_message(make_message("saluta"))
 
-    assert recorder.calls, "handler must reply via bot.send_message/edit_message_text"
+    assert recorder.calls, "handler must reply via bot.send_message"
     assert recorder.calls[-1]["text"] == "Hello world"
     assert recorder.calls[-1]["chat_id"] == CHAT_ID
-    assert any(call["method"] == "edit" for call in recorder.calls), "use edits for streaming"
 
     history = [message.content for message in backend.calls[-1]]
     assert "saluta" in history
@@ -353,6 +353,52 @@ class EchoTool:
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> Any:
         return "ok"
+
+
+async def test_working_preview_is_silent_and_final_notifies(
+    app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    backend = ScriptedLLMBackend(
+        [
+            [
+                StreamChunk(
+                    tool_calls=[ToolCallRequest(id="call_echo", name="echo", args={})],
+                    finish_reason="tool_calls",
+                )
+            ],
+            text_chunks("fatto"),
+        ]
+    )
+    service = AgentService(app_config)
+    await service.setup(backend)
+    service.registry.register(EchoTool())
+    bot = TelegramBot(
+        service, TelegramChannelConfig(allowed_user_ids=[USER_ID]), SessionManager(service)
+    )
+    recorder = RecordingBot()
+    bot.bot = recorder  # type: ignore[assignment]
+
+    await bot.handle_message(make_message("echeggia"))
+
+    previews = [
+        call
+        for call in recorder.calls
+        if call["method"] == "send" and "Working: echo" in call["text"]
+    ]
+    assert previews, "the working status must be sent as a preview"
+    assert all(call["disable_notification"] is True for call in previews)
+
+    final = recorder.calls[-1]
+    assert final["method"] == "send"
+    assert final["text"] == "fatto"
+    assert not final["disable_notification"], "the final reply must notify"
+
+    assert any(call["method"] == "delete" for call in recorder.calls), (
+        "the silent preview must be deleted before the final message"
+    )
+
+    await service.shutdown()
 
 
 async def test_tool_call_shows_a_working_status(
@@ -433,7 +479,7 @@ async def test_working_status_is_removed_when_pausing_for_approval(
     await service.shutdown()
 
 
-async def test_not_modified_edit_does_not_duplicate(
+async def test_not_modified_edit_does_not_duplicate_the_final(
     app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
@@ -450,12 +496,12 @@ async def test_not_modified_edit_does_not_duplicate(
 
     await bot.handle_message(make_message("saluta"))
 
-    duplicates = [
+    finals = [
         call
         for call in recorder.calls
         if call["method"] == "send" and call["text"] == "Hello world"
     ]
-    assert duplicates == []
+    assert len(finals) == 1
 
     await service.shutdown()
 
@@ -532,7 +578,7 @@ async def test_final_reply_is_rendered_as_telegram_html(
     await bot.handle_message(make_message("saluta"))
 
     final = recorder.calls[-1]
-    assert final["method"] == "edit"
+    assert final["method"] == "send"
     assert final["parse_mode"] == "HTML"
     assert final["text"] == "<b>bold</b> and <code>code</code>"
 
@@ -555,7 +601,7 @@ async def test_html_failure_falls_back_to_plain_text(
     await bot.handle_message(make_message("saluta"))
 
     final = recorder.calls[-1]
-    assert final["method"] == "edit"
+    assert final["method"] == "send"
     assert final["parse_mode"] is None
     assert final["text"] == "bold"
 
@@ -656,10 +702,11 @@ async def test_callback_deletes_approval_message(
 
     await bot.handle_approval_callback(make_callback(f"{APPROVE_PREFIX}call_1"))
 
-    deletes = [call for call in recorder.calls if call["method"] == "delete"]
+    deletes = [
+        call for call in recorder.calls if call["method"] == "delete" and call["message_id"] == 56
+    ]
     assert len(deletes) == 1
     assert deletes[0]["chat_id"] == CHAT_ID
-    assert deletes[0]["message_id"] == 56
 
     await service.shutdown()
 

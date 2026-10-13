@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -8,6 +9,7 @@ import pytest
 from graph_agent.config import WebSearchToolConfig
 from graph_agent.tools import websearch as websearch_module
 from graph_agent.tools.base import ToolContext
+from graph_agent.tools.policy import RunState
 from graph_agent.tools.websearch import WebSearchTool
 
 
@@ -310,3 +312,92 @@ async def test_truncates_snippets_to_config_limit(minimal_config: Any) -> None:
     results = await tool.execute({"query": "x"}, ctx)
 
     assert len(results[0]["snippet"]) == 50
+
+
+def per_query_handler(request: httpx.Request) -> httpx.Response:
+    query = request.url.params["q"]
+    return httpx.Response(
+        200,
+        json={
+            "results": [
+                {"title": query, "url": f"https://example.com/{query}", "content": f"s {query}"},
+                {"title": "shared", "url": "https://example.com/shared", "content": "s"},
+            ]
+        },
+    )
+
+
+async def test_spec_exposes_queries_parameter(minimal_config: Any) -> None:
+    tool = WebSearchTool(WebSearchToolConfig(enabled=True, api_base="http://x"))
+    properties = tool.spec.parameters["properties"]
+    assert "queries" in properties
+    assert tool.spec.parameters["required"] == ["query"]
+
+
+async def test_batch_merges_and_dedups_urls(minimal_config: Any) -> None:
+    tool = build_tool(per_query_handler, {})
+    ctx = await make_ctx(minimal_config)
+
+    results = await tool.execute({"query": "alpha", "queries": ["beta"]}, ctx)
+
+    assert [item["url"] for item in results] == [
+        "https://example.com/alpha",
+        "https://example.com/shared",
+        "https://example.com/beta",
+    ]
+
+
+async def test_batch_tolerates_a_failed_query(minimal_config: Any) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["q"] == "boom":
+            return httpx.Response(200, json={"results": []})
+        return httpx.Response(200, json=searx_payload(2))
+
+    tool = build_tool(handler, {})
+    ctx = await make_ctx(minimal_config)
+
+    results = await tool.execute({"query": "ok", "queries": ["boom"]}, ctx)
+
+    assert len(results) == 2
+
+
+async def test_batch_all_failed_raises(minimal_config: Any) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": []})
+
+    tool = build_tool(handler, {})
+    ctx = await make_ctx(minimal_config)
+
+    with pytest.raises(RuntimeError, match="no results"):
+        await tool.execute({"query": "a", "queries": ["b"]}, ctx)
+
+
+async def test_batch_caps_number_of_queries(minimal_config: Any) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params["q"])
+        return httpx.Response(200, json=searx_payload(1))
+
+    tool = build_tool(handler, {})
+    ctx = await make_ctx(minimal_config)
+
+    await tool.execute({"query": "q0", "queries": ["q1", "q2", "q3", "q4", "q5"]}, ctx)
+
+    assert seen == ["q0", "q1", "q2", "q3"]
+
+
+async def test_results_deduplicated_across_calls_within_a_run(minimal_config: Any) -> None:
+    tool = build_tool(ok_handler(3), {})
+    ctx = ToolContext(
+        session_id="t",
+        workspace=Path("/tmp"),
+        config=minimal_config,
+        state=RunState(),
+    )
+
+    first = await tool.execute({"query": "a"}, ctx)
+    second = await tool.execute({"query": "b"}, ctx)
+
+    assert len(first) == 3
+    assert second == []

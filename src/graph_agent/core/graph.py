@@ -23,6 +23,12 @@ from graph_agent.core.state import AgentState, resolve_approval_mode
 from graph_agent.events import ErrorEvent, FileEvent, TokenEvent, ToolCallEvent, ToolResultEvent
 from graph_agent.models.llm import LLMBackend
 from graph_agent.tools.base import ToolContext, ToolRegistry
+from graph_agent.tools.policy import (
+    SearchBudgetPolicy,
+    SearchDedupPolicy,
+    ToolCallInfo,
+    ToolPolicyRegistry,
+)
 
 
 def build_agent_graph(
@@ -40,6 +46,13 @@ def build_agent_graph(
     output_limit = config.agent.max_tool_output_chars
     repeat_limit = config.agent.repeat_tool_call_limit
     workspace = Path(config.agent.workspace)
+
+    policies = ToolPolicyRegistry()
+    search = config.tools.web_search
+    if search.dedupe_similarity > 0:
+        policies.register(SearchDedupPolicy(search.dedupe_similarity))
+    if search.max_calls_per_run > 0:
+        policies.register(SearchBudgetPolicy(search.max_calls_per_run))
 
     async def compact_node(state: AgentState) -> dict[str, object]:
         replacement = await compact(
@@ -145,6 +158,27 @@ def build_agent_graph(
             )
             return ToolMessage(content=result, tool_call_id=call_id)
 
+        run_state = metrics.policy_state if metrics is not None else None
+        if run_state is not None:
+            decision = await policies.apply(ToolCallInfo(name=name, args=args), run_state)
+            args = decision.args
+            if decision.result is not None:
+                writer({"event": ToolCallEvent(tool_call_id=call_id, name=name, args=args)})
+                writer(
+                    {
+                        "event": ToolResultEvent(
+                            tool_call_id=call_id,
+                            name=name,
+                            result=decision.result,
+                            is_error=decision.is_error,
+                        )
+                    }
+                )
+                return ToolMessage(
+                    content=_tool_message_content(decision.result, output_limit),
+                    tool_call_id=call_id,
+                )
+
         if tool.spec.requires_approval and manual_mode:
             approval_payload = {
                 "approval_id": call_id,
@@ -198,6 +232,7 @@ def build_agent_graph(
                     session_id=str(state.get("session_id", "")),
                     workspace=workspace,
                     config=config,
+                    state=run_state,
                 ),
             )
         except Exception as exc:

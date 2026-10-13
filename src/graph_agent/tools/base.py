@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from graph_agent.config import AppConfig
+from graph_agent.tools.policy import RunState
 
 
 @dataclass(slots=True)
@@ -22,6 +23,7 @@ class ToolContext:
     session_id: str
     workspace: Path
     config: AppConfig
+    state: RunState | None = None
 
 
 class Tool(Protocol):

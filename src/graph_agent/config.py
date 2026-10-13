@@ -136,6 +136,9 @@ class WebSearchToolConfig(BaseModel):
     api_key_env: str | None = None
     timeout_seconds: float = 30.0
     max_snippet_chars: int = 1000
+    max_queries_per_call: int = 4
+    max_calls_per_run: int = 6
+    dedupe_similarity: float = 0.8
 
 
 class WebFetchToolConfig(BaseModel):

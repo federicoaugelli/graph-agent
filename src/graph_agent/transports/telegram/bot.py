@@ -107,8 +107,10 @@ class TelegramBot:
     - handle_message: allowed_user_ids gate (empty = deny all), /new resets the thread, /auto and
       /manual toggle the approval mode; anything else runs the agent and streams
       the reply via a send_message placeholder then edit_message_text
-    - streaming edits stay plain text; the final reply is converted from markdown
-      to the Telegram HTML subset and sent with parse_mode=HTML (fallback: plain)
+    - the streaming placeholder is plain text sent with disable_notification so
+      "Working…" previews never ping the user; on completion the placeholder is
+      deleted and the final reply is sent as a fresh (notifying) message converted
+      from markdown to the Telegram HTML subset (fallback: plain)
     - handle_file: downloads document/photo into workspace/incoming/{chat_id}/
       and runs the agent with the caption plus the saved path
     - ApprovalRequestEvent -> send_message with InlineKeyboardMarkup whose buttons
@@ -295,7 +297,9 @@ class TelegramBot:
                 return
             if placeholder is None:
                 typing_done.set()
-                placeholder = await self.bot.send_message(chat_id=chat_id, text=current)
+                placeholder = await self.bot.send_message(
+                    chat_id=chat_id, text=current, disable_notification=True
+                )
                 last_edit = time.monotonic()
                 return
             if not force and time.monotonic() - last_edit < interval:
@@ -348,13 +352,10 @@ class TelegramBot:
             return
 
         final_text = "".join(text_parts).strip()
-        if final_text:
-            if placeholder is not None:
-                await self._edit_html(chat_id, placeholder.message_id, final_text)
-            else:
-                await send_telegram_html(self.bot, chat_id, final_text)
-        elif placeholder is not None:
+        if placeholder is not None:
             await self._delete_message(chat_id, placeholder.message_id)
+        if final_text:
+            await send_telegram_html(self.bot, chat_id, final_text)
 
         if approval is not None:
             await self._send_approval_request(chat_id, approval)
@@ -371,50 +372,6 @@ class TelegramBot:
             except TimeoutError:
                 pass
             await self._send_typing(chat_id)
-
-    async def _edit_html(self, chat_id: int, message_id: int, text: str) -> None:
-        """Replace a message with the markdown rendered as Telegram HTML.
-
-        Long replies are split (Telegram caps messages at 4096 chars), the first
-        chunk replaces the streaming placeholder, the rest go as new messages.
-        If Telegram rejects the HTML it falls back to plain text.
-        """
-        chunks = split_telegram_html(markdown_to_telegram_html(text))
-        for index, chunk in enumerate(chunks):
-            if index == 0:
-                await self._replace_message(chat_id, message_id, chunk)
-            else:
-                try:
-                    await self.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=HTML)
-                except TelegramBadRequest:
-                    await self.bot.send_message(chat_id=chat_id, text=html_to_plain(chunk))
-
-    async def _replace_message(self, chat_id: int, message_id: int, chunk: str) -> None:
-        """Rewrite the streaming placeholder, degrading on parse errors or flood control.
-
-        Tries HTML first, then plain text; each attempt tolerates one RetryAfter by
-        waiting, and if editing stays impossible the chunk is sent as a new message.
-        """
-        for parse_mode, body in ((HTML, chunk), (None, html_to_plain(chunk))):
-            for attempt in range(2):
-                try:
-                    await self.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=body,
-                        parse_mode=parse_mode,
-                    )
-                    return
-                except TelegramBadRequest as exc:
-                    if "not modified" in str(exc):
-                        return
-                    break
-                except TelegramRetryAfter as exc:
-                    if attempt == 0:
-                        await asyncio.sleep(exc.retry_after)
-                        continue
-                    break
-        await self.bot.send_message(chat_id=chat_id, text=html_to_plain(chunk))
 
     async def _send_approval_request(self, chat_id: int, approval: ApprovalRequestEvent) -> None:
         keyboard = InlineKeyboardMarkup(

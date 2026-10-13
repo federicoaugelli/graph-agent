@@ -3,6 +3,8 @@ from __future__ import annotations
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 
+from graph_agent.tools.policy import RunState
+
 _current: ContextVar[RunMetrics | None] = ContextVar("graph_agent_run_metrics", default=None)
 
 
@@ -23,6 +25,7 @@ class RunMetrics:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     signatures: dict[tuple[str, str], int] = field(default_factory=dict)
+    policy_state: RunState = field(default_factory=RunState)
 
 
 def start_run_metrics() -> tuple[RunMetrics, Token[RunMetrics | None]]:
